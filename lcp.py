@@ -206,5 +206,6 @@ class LCP:
             k=1,
             which="LM",
             return_singular_vectors=False,
+            tol=1e-7,
         )[0]
         return float(abs(largest_singular_value))
