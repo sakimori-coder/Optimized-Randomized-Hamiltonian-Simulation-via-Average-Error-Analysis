@@ -3,13 +3,14 @@ import pytest
 import networkx as nx
 from scipy import sparse
 
-from lcp import LCP
+from operators import LCP
 
 
 def test_keeps_zero_and_small_coefficients():
-    hamiltonian = LCP({"I": 0, "X": 1e-20})
+    hamiltonian = LCP({"I": 0, "X": 1e-20, "Y": 2 + 0j})
 
-    assert hamiltonian.terms == {"I": 0j, "X": 1e-20 + 0j}
+    assert hamiltonian.terms == {"I": 0.0, "X": 1e-20, "Y": 2.0}
+    assert all(isinstance(value, float) for value in hamiltonian.terms.values())
 
 
 def test_subtraction_combines_coefficients_without_removing_zero():
@@ -18,7 +19,7 @@ def test_subtraction_combines_coefficients_without_removing_zero():
 
     difference = left - right
 
-    assert difference.terms == {"X": 0j, "Z": 3 + 0j, "Y": -1 + 0j}
+    assert difference.terms == {"X": 0.0, "Z": 3.0, "Y": -1.0}
 
 
 def test_subtraction_rejects_different_qubit_counts():
@@ -27,11 +28,14 @@ def test_subtraction_rejects_different_qubit_counts():
 
 
 def test_scalar_multiplication_from_both_sides():
-    hamiltonian = LCP({"X": 2, "Z": -1j})
+    hamiltonian = LCP({"X": 2, "Z": -1})
 
-    assert (0.5 * hamiltonian).terms == {"X": 1 + 0j, "Z": -0.5j}
-    assert (hamiltonian * 2j).terms == {"X": 4j, "Z": 2 + 0j}
-    assert (hamiltonian * 0).terms == {"X": 0j, "Z": 0j}
+    assert (0.5 * hamiltonian).terms == {"X": 1.0, "Z": -0.5}
+    assert (hamiltonian * 2).terms == {"X": 4.0, "Z": -2.0}
+    assert (hamiltonian * 0).terms == {"X": 0.0, "Z": 0.0}
+
+    with pytest.raises(ValueError, match="scalar must be real"):
+        hamiltonian * 2j
 
 
 def test_commutation_graph_contains_all_pauli_strings_and_coefficients():
@@ -92,22 +96,21 @@ def test_csr_matrix_matches_dense_matrix():
 
 
 def test_coefficient_one_norm():
-    hamiltonian = LCP({"II": 0, "XX": -2, "YZ": 3j})
+    hamiltonian = LCP({"II": 0, "XX": -2, "YZ": 3})
 
     assert hamiltonian.coefficient_one_norm() == pytest.approx(5.0)
 
 
 def test_operator_norm_uses_largest_singular_value():
-    # X + iY = [[0, 2], [0, 0]], whose spectral norm is 2.
-    hamiltonian = LCP({"X": 1, "Y": 1j})
+    hamiltonian = LCP({"X": 1, "Y": 1})
 
-    assert hamiltonian.operator_norm() == pytest.approx(2.0)
+    assert hamiltonian.operator_norm() == pytest.approx(np.sqrt(2))
 
 
 def test_operator_norm_for_multi_qubit_sparse_matrix():
-    hamiltonian = LCP({"XI": 1, "YI": 1j})
+    hamiltonian = LCP({"XI": 1, "YI": 1})
 
-    assert hamiltonian.operator_norm() == pytest.approx(2.0)
+    assert hamiltonian.operator_norm() == pytest.approx(np.sqrt(2))
 
 
 def test_operator_norm_of_zero_operator():
@@ -132,3 +135,5 @@ def test_rejects_invalid_terms():
         LCP({"X": 1, "ZZ": 2})
     with pytest.raises(TypeError, match="coefficient"):
         LCP({"X": "1"})
+    with pytest.raises(ValueError, match="coefficients must be real"):
+        LCP({"X": 1.0j})

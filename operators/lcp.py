@@ -1,4 +1,4 @@
-r"""Linear combinations of Pauli strings.
+r"""Real linear combinations of Pauli strings used throughout the project.
 
 The left-most character is the most-significant qubit.  Thus ``"XI"``
 represents :math:`X \otimes I`.
@@ -26,11 +26,12 @@ _VALID_PAULIS = frozenset(_PAULI_MATRICES)
 
 
 class LCP:
-    """Linear combination of Pauli strings of the same length.
+    """Real linear combination of Pauli strings of the same length.
 
     Args:
-        terms: Mapping from a Pauli string to its coefficient.  Coefficients,
-            including zero and very small values, are stored unchanged.
+        terms: Mapping from a Pauli string to its real coefficient.
+            Numerically real complex values such as ``1 + 0j`` are accepted.
+            Zero and very small coefficients are stored unchanged.
         num_qubits: Number of qubits.  This is inferred from ``terms`` when
             possible and is only necessary when ``terms`` is empty.
 
@@ -58,11 +59,14 @@ class LCP:
             raise TypeError("terms must be a mapping from Pauli strings to coefficients")
 
         inferred_num_qubits = num_qubits
-        validated_terms: dict[str, complex] = {}
+        validated_terms: dict[str, float] = {}
         for pauli_string, coefficient in terms.items():
             self._validate_pauli_string(pauli_string)
             if not isinstance(coefficient, Number):
                 raise TypeError(f"coefficient of {pauli_string!r} must be a number")
+            numeric_coefficient = complex(coefficient)
+            if numeric_coefficient.imag != 0.0:
+                raise ValueError("LCP coefficients must be real")
 
             if inferred_num_qubits is None:
                 inferred_num_qubits = len(pauli_string)
@@ -70,7 +74,7 @@ class LCP:
                 raise ValueError("all Pauli strings must have the same length as num_qubits")
 
             # Do not simplify or discard coefficients here.
-            validated_terms[pauli_string] = complex(coefficient)
+            validated_terms[pauli_string] = float(numeric_coefficient.real)
 
         if inferred_num_qubits is None:
             raise ValueError("num_qubits is required when terms is empty")
@@ -87,7 +91,7 @@ class LCP:
             raise ValueError(f"invalid Pauli character(s): {sorted(invalid_symbols)}")
 
     @property
-    def terms(self) -> dict[str, complex]:
+    def terms(self) -> dict[str, float]:
         """Return a copy of the Pauli-string-to-coefficient mapping."""
         return dict(self._terms)
 
@@ -105,16 +109,20 @@ class LCP:
 
         result = self.terms
         for pauli_string, coefficient in other._terms.items():
-            result[pauli_string] = result.get(pauli_string, 0j) - coefficient
+            result[pauli_string] = result.get(pauli_string, 0.0) - coefficient
         return LCP(result, num_qubits=self.num_qubits)
 
     def __mul__(self, scalar: complex) -> LCP:
         """Multiply every coefficient by a scalar."""
         if not isinstance(scalar, Number):
             return NotImplemented
+        numeric_scalar = complex(scalar)
+        if numeric_scalar.imag != 0.0:
+            raise ValueError("LCP scalar must be real")
+        real_scalar = float(numeric_scalar.real)
         return LCP(
             {
-                pauli_string: coefficient * scalar
+                pauli_string: coefficient * real_scalar
                 for pauli_string, coefficient in self._terms.items()
             },
             num_qubits=self.num_qubits,

@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-from lcp import LCP
+from operators import LCP
 
 
 def _pauli_to_binary_vector(pauli_string: str) -> int:

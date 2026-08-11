@@ -1,10 +1,9 @@
 import numpy as np
 import pytest
 
-import qdrift_variance_estimator
-from lch import LCH
-from lcp import LCP
-from qdrift_variance_estimator import (
+from diamond_distance import variance
+from operators import LCH, LCP
+from diamond_distance.variance import (
     anticommuting_bound_from_samples,
     estimate_lch_centered_second_moment_norm,
     lch_centered_second_moment_pauli_coefficients,
@@ -13,8 +12,14 @@ from qdrift_variance_estimator import (
 )
 
 
+def _pauli(pauli: str) -> LCP:
+    return LCP({pauli: 1.0})
+
+
 def test_lch_exact_estimator_is_separate_from_error_and_cost_parameters() -> None:
-    hamiltonian = LCH([(1.0, "X", 10.0), (1.0, "Z", 20.0)])
+    hamiltonian = LCH(
+        [(1.0, _pauli("X"), 10.0), (1.0, _pauli("Z"), 20.0)]
+    )
 
     exact = estimate_lch_centered_second_moment_norm(
         hamiltonian,
@@ -25,7 +30,7 @@ def test_lch_exact_estimator_is_separate_from_error_and_cost_parameters() -> Non
 
 
 def test_accepts_a_custom_estimator_callable() -> None:
-    hamiltonian = LCH([(1.0, "X", 1.0)])
+    hamiltonian = LCH([(1.0, _pauli("X"), 1.0)])
 
     value = estimate_lch_centered_second_moment_norm(
         hamiltonian,
@@ -41,7 +46,7 @@ def test_accepts_a_custom_estimator_callable() -> None:
 def test_removed_method_names_are_rejected(method: str) -> None:
     with pytest.raises(ValueError, match="unknown method"):
         estimate_lch_centered_second_moment_norm(
-            LCH([(1.0, "X", 1.0)]),
+            LCH([(1.0, _pauli("X"), 1.0)]),
             method=method,  # type: ignore[arg-type]
         )
 
@@ -49,13 +54,13 @@ def test_removed_method_names_are_rejected(method: str) -> None:
 def test_contraction_bound_is_one_without_materializing_matrices(
     monkeypatch,
 ) -> None:
-    hamiltonian = LCH([(1.0, "X" * 100, 1.0)])
+    hamiltonian = LCH([(1.0, _pauli("X" * 100), 1.0)])
 
     def fail_if_materialized(_hamiltonian):
         pytest.fail("contraction_bound must not materialize Pauli matrices")
 
     monkeypatch.setattr(
-        qdrift_variance_estimator,
+        variance,
         "lch_qdrift_decomposition",
         fail_if_materialized,
     )
@@ -69,7 +74,7 @@ def test_contraction_bound_is_one_without_materializing_matrices(
 
 
 def test_contraction_bound_is_zero_for_zero_hamiltonian() -> None:
-    hamiltonian = LCH([(0.0, "X", 1.0)])
+    hamiltonian = LCH([(0.0, _pauli("X"), 1.0)])
 
     value = estimate_lch_centered_second_moment_norm(
         hamiltonian,
@@ -79,23 +84,18 @@ def test_contraction_bound_is_zero_for_zero_hamiltonian() -> None:
     assert value == 0.0
 
 
-def test_contraction_bound_rejects_non_hermitian_lch() -> None:
-    hamiltonian = LCH([(1.0j, "X", 1.0)])
-
-    with pytest.raises(ValueError, match="requires real"):
-        estimate_lch_centered_second_moment_norm(
-            hamiltonian,
-            method="contraction_bound",
-        )
+def test_lch_rejects_non_real_coefficient() -> None:
+    with pytest.raises(ValueError, match="must be real"):
+        LCH([(1.0j, _pauli("X"), 1.0)])
 
 
 def test_polynomial_pauli_bounds_dominate_exact_value() -> None:
     hamiltonian = LCH(
         [
-            (0.7, "XI", 1.0),
-            (-0.4, "IZ", 1.0),
-            (0.2, "YY", 1.0),
-            (0.9, "ZX", 1.0),
+            (0.7, _pauli("XI"), 1.0),
+            (-0.4, _pauli("IZ"), 1.0),
+            (0.2, _pauli("YY"), 1.0),
+            (0.9, _pauli("ZX"), 1.0),
         ]
     )
 
@@ -122,7 +122,9 @@ def test_polynomial_pauli_bounds_dominate_exact_value() -> None:
 
 
 def test_pauli_l1_bound_combines_products_before_absolute_values() -> None:
-    hamiltonian = LCH([(1.0, "X", 1.0), (1.0, "Z", 1.0)])
+    hamiltonian = LCH(
+        [(1.0, _pauli("X"), 1.0), (1.0, _pauli("Z"), 1.0)]
+    )
 
     pauli_l1 = estimate_lch_centered_second_moment_norm(
         hamiltonian,
@@ -147,6 +149,52 @@ def test_pauli_l1_bound_supports_grouped_pauli_samples() -> None:
 
     # V = 3/8 I + 1/8 ZZ, whose coefficient 1-norm and operator norm are 1/2.
     assert bound == pytest.approx(0.5)
+
+
+def test_general_multi_pauli_lch_matches_from_samples_estimators() -> None:
+    operators = [
+        LCP({"ZI": 0.5, "IZ": 0.5}),
+        LCP({"XX": 0.5, "YY": 0.5}),
+    ]
+    coefficients = [1.5, -0.75]
+    hamiltonian = LCH(
+        [
+            (coefficient, operator, 1.0)
+            for coefficient, operator in zip(coefficients, operators)
+        ]
+    )
+    weights = [abs(coefficient) for coefficient in coefficients]
+    signed_samples = [
+        np.sign(coefficient) * operator
+        for coefficient, operator in zip(coefficients, operators)
+    ]
+
+    decomposition = variance.qdrift_decomposition_from_samples(
+        weights,
+        [sample.to_csr() for sample in signed_samples],
+    )
+    direct_exact = variance.estimate_centered_second_moment_norm(
+        decomposition,
+        method="exact",
+    )
+    assert estimate_lch_centered_second_moment_norm(
+        hamiltonian,
+        method="exact",
+    ) == pytest.approx(direct_exact, abs=1e-10)
+
+    estimators = {
+        "pauli_l1_bound": pauli_l1_bound_from_samples,
+        "anticommuting_bound": anticommuting_bound_from_samples,
+        "sdp_bound": pauli_moment_sdp_bound_from_samples,
+    }
+    for method, from_samples in estimators.items():
+        assert estimate_lch_centered_second_moment_norm(
+            hamiltonian,
+            method=method,
+        ) == pytest.approx(
+            from_samples(weights, signed_samples),
+            abs=1e-7,
+        )
 
 
 def test_pauli_l1_bound_is_zero_for_one_group_sample() -> None:
@@ -181,10 +229,10 @@ def test_anticommuting_bound_supports_grouped_pauli_samples() -> None:
 def test_symbolic_pauli_products_combine_with_the_correct_phases() -> None:
     hamiltonian = LCH(
         [
-            (1.0, "XX", 1.0),
-            (1.0, "YY", 1.0),
-            (1.0, "ZI", 1.0),
-            (1.0, "IZ", 1.0),
+            (1.0, _pauli("XX"), 1.0),
+            (1.0, _pauli("YY"), 1.0),
+            (1.0, _pauli("ZI"), 1.0),
+            (1.0, _pauli("IZ"), 1.0),
         ]
     )
 
@@ -201,7 +249,11 @@ def test_symbolic_pauli_products_combine_with_the_correct_phases() -> None:
 
 def test_anticommuting_bound_improves_the_pauli_l1_bound() -> None:
     hamiltonian = LCH(
-        [(1.0, "I", 1.0), (1.0, "X", 1.0), (1.0, "Z", 1.0)]
+        [
+            (1.0, _pauli("I"), 1.0),
+            (1.0, _pauli("X"), 1.0),
+            (1.0, _pauli("Z"), 1.0),
+        ]
     )
 
     pauli_l1 = estimate_lch_centered_second_moment_norm(
@@ -218,7 +270,9 @@ def test_anticommuting_bound_improves_the_pauli_l1_bound() -> None:
 
 
 def test_pauli_moment_sdp_uses_anticommutation_relations() -> None:
-    hamiltonian = LCH([(3.0, "X", 1.0), (1.0, "Z", 1.0)])
+    hamiltonian = LCH(
+        [(3.0, _pauli("X"), 1.0), (1.0, _pauli("Z"), 1.0)]
+    )
 
     value = estimate_lch_centered_second_moment_norm(
         hamiltonian,
@@ -268,11 +322,11 @@ def test_pauli_moment_sdp_bound_dominates_exact_grouped_variance() -> None:
         LCP({"ZI": 1.0}),
     ]
     weights = [1.5, 1.0, 1.0]
-    decomposition = qdrift_variance_estimator.qdrift_decomposition_from_samples(
+    decomposition = variance.qdrift_decomposition_from_samples(
         weights,
         [sample.to_csr() for sample in samples],
     )
-    exact = qdrift_variance_estimator.estimate_centered_second_moment_norm(
+    exact = variance.estimate_centered_second_moment_norm(
         decomposition,
         method="exact",
     )
@@ -293,8 +347,8 @@ def test_polynomial_bounds_do_not_materialize_pauli_matrices(
 ) -> None:
     hamiltonian = LCH(
         [
-            (1.0, "X" * 1000, 1.0),
-            (-0.5, "Z" * 1000, 1.0),
+            (1.0, _pauli("X" * 1000), 1.0),
+            (-0.5, _pauli("Z" * 1000), 1.0),
         ]
     )
 
@@ -302,8 +356,7 @@ def test_polynomial_bounds_do_not_materialize_pauli_matrices(
         pytest.fail(f"{method} must not materialize Pauli matrices")
 
     for owner, attribute in (
-        (qdrift_variance_estimator, "lch_qdrift_decomposition"),
-        (LCH, "_materialize_operator"),
+        (variance, "lch_qdrift_decomposition"),
         (LCH, "to_csr"),
         (LCH, "to_matrix"),
         (LCP, "to_csr"),

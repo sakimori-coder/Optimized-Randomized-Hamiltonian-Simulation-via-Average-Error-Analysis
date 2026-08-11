@@ -2,6 +2,7 @@ r"""Operator-norm estimates for a commuting Pauli Hamiltonian."""
 
 from __future__ import annotations
 
+import math
 from fractions import Fraction
 from typing import Literal
 
@@ -9,10 +10,10 @@ import numpy as np
 from scipy import sparse
 from scipy.optimize import linprog
 
-from lcp import LCP
+from operators import LCP
 
 
-BuiltInMethod = Literal["coefficient_l1", "lp", "exact"]
+GroupNormMethod = Literal["coefficient_l1", "frobenius", "lp", "exact"]
 
 _PAULI_PRODUCT: dict[tuple[str, str], tuple[int, str]] = {
     ("I", "I"): (0, "I"),
@@ -258,6 +259,21 @@ def _coefficient_l1_bound(hamiltonian: LCP) -> float:
     return _float_rounding_up(exact_sum)
 
 
+def _frobenius_norm(hamiltonian: LCP) -> float:
+    r"""Return ``||hamiltonian||_F`` from its Pauli coefficients.
+
+    The ``n``-qubit Pauli strings are orthogonal under the Hilbert--Schmidt
+    inner product, so
+
+    ``||sum_P a_P P||_F = sqrt(2**n * sum_P a_P**2)``.
+    """
+    coefficient_square_sum = math.fsum(
+        coefficient * coefficient
+        for coefficient in hamiltonian.terms.values()
+    )
+    return math.sqrt((1 << hamiltonian.num_qubits) * coefficient_square_sum)
+
+
 def _lp_relaxation_bound(hamiltonian: LCP) -> float:
     identity = "I" * hamiltonian.num_qubits
     constant_coefficient = 0.0
@@ -345,24 +361,29 @@ def _lp_relaxation_bound(hamiltonian: LCP) -> float:
 def estimate_commuting_operator_norm_upper_bound(
     hamiltonian: LCP,
     *,
-    method: BuiltInMethod = "coefficient_l1",
+    method: GroupNormMethod = "coefficient_l1",
 ) -> float:
     r"""Estimate ``||hamiltonian||_op`` with the selected method.
 
     ``coefficient_l1`` returns the matrix-free bound ``sum_j |c_j|``.
-    ``lp`` tightens that bound using Pauli-product parity relations and a
-    matrix-free linear-programming relaxation.  ``exact`` constructs the
-    ``2**n`` dimensional CSR matrix and numerically computes its largest
-    singular value.
+    ``frobenius`` returns the matrix-free Frobenius norm
+    ``sqrt(2**n * sum_j c_j**2)``.  ``lp`` tightens the coefficient-one-norm
+    bound using Pauli-product parity relations and a matrix-free
+    linear-programming relaxation.  ``exact`` constructs the ``2**n``
+    dimensional CSR matrix and numerically computes its largest singular
+    value.
 
     The input is assumed to be a bounded, pairwise-commuting Hermitian LCP.
     """
     if method == "coefficient_l1":
         return _coefficient_l1_bound(hamiltonian)
+    if method == "frobenius":
+        return _frobenius_norm(hamiltonian)
     if method == "lp":
         return _lp_relaxation_bound(hamiltonian)
     if method == "exact":
         return hamiltonian.operator_norm()
     raise ValueError(
-        "unknown method; expected 'coefficient_l1', 'lp', or 'exact'"
+        "unknown method; expected 'coefficient_l1', 'frobenius', 'lp', "
+        "or 'exact'"
     )

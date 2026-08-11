@@ -1,4 +1,4 @@
-r"""Estimators for the normalized centered qDRIFT second moment.
+r"""Estimate the normalized centered second moment used by qDRIFT bounds.
 
 The target quantity is
 
@@ -20,8 +20,7 @@ import numpy as np
 from numpy.typing import NDArray
 from scipy import sparse
 
-from lch import LCH
-from lcp import LCP
+from operators import LCH, LCP
 
 
 @dataclass(frozen=True)
@@ -45,28 +44,26 @@ VarianceEstimator = Callable[[QDriftDecomposition], float]
 
 
 def lch_qdrift_decomposition(hamiltonian: LCH) -> QDriftDecomposition:
-    r"""Build ``p_j`` and signed Pauli samples ``H_j`` from an LCH.
+    r"""Build ``p_j`` and signed LCP samples ``H_j`` from an LCH.
 
-    For ``H = sum_j c_j P_j``, this uses
-    ``p_j=|c_j|/Lambda`` and ``H_j=(c_j/|c_j|)P_j``.
+    For ``H = sum_j c_j A_j``, this uses
+    ``p_j=|c_j|/Lambda`` and ``H_j=(c_j/|c_j|)A_j``.
     LCH evolution costs do not enter the decomposition.
     """
     if not isinstance(hamiltonian, LCH):
         raise TypeError("hamiltonian must be an LCH")
 
     active_terms = [
-        (coefficient, pauli)
-        for coefficient, pauli, _ in hamiltonian.lcp_terms
+        (coefficient, operator)
+        for coefficient, operator, _ in hamiltonian.lcp_terms
         if coefficient != 0
     ]
     weights = [abs(coefficient) for coefficient, _ in active_terms]
     sampled_hamiltonians = [
-        (coefficient / abs(coefficient))
-        * LCP(
-            {pauli: 1.0},
-            num_qubits=hamiltonian.num_qubits,
+        (
+            math.copysign(1.0, coefficient) * operator
         ).to_csr()
-        for coefficient, pauli in active_terms
+        for coefficient, operator in active_terms
     ]
     return qdrift_decomposition_from_samples(weights, sampled_hamiltonians)
 
@@ -135,7 +132,7 @@ def estimate_lch_centered_second_moment_norm(
     - ``exact``: explicitly sum each centered sparse matrix square and
       numerically compute the resulting operator norm.
     - ``contraction_bound``: return the matrix-free upper bound ``1`` for
-      Hermitian contractions ``H_j``.  LCH Pauli coefficients must be real.
+      Hermitian contractions ``H_j``.
     - ``pauli_l1_bound``: symbolically expand the variance in the Pauli basis
       and use the coefficient one-norm after combining equal products.
     - ``anticommuting_bound``: greedily partition the symbolic non-identity
@@ -143,6 +140,10 @@ def estimate_lch_centered_second_moment_norm(
       norms followed by a triangle inequality.
     - ``sdp_bound``: solve a level-1 Pauli moment SDP using Pauli-product,
       commutation, and sample-contraction constraints.
+
+    All four matrix-free bound methods assume that every signed LCP sample is
+    a Hermitian contraction.  ``LCH`` does not normalize or verify this
+    precondition; use ``exact`` for a general unnormalized decomposition.
 
     A custom callable taking :class:`QDriftDecomposition` may be supplied to
     experiment with another estimator without changing cost code.
@@ -159,37 +160,15 @@ def estimate_lch_centered_second_moment_norm(
         "sdp_bound",
     }
     if isinstance(method, str) and method in matrix_free_methods:
-        active_terms = _active_real_pauli_terms(hamiltonian, method=method)
-        if not active_terms:
+        weights, samples = _active_lch_samples(hamiltonian, method=method)
+        if not weights:
             return 0.0
         if method == "contraction_bound":
             return 1.0
         if method == "pauli_l1_bound":
-            coefficients = _normalized_variance_pauli_coefficients(
-                active_terms,
-                num_qubits=hamiltonian.num_qubits,
-            )
-            return min(1.0, float(sum(abs(value) for value in coefficients.values())))
+            return pauli_l1_bound_from_samples(weights, samples)
         if method == "anticommuting_bound":
-            coefficients = _normalized_variance_pauli_coefficients(
-                active_terms,
-                num_qubits=hamiltonian.num_qubits,
-            )
-            return min(
-                1.0,
-                _anticommuting_partition_bound(
-                    coefficients,
-                    num_qubits=hamiltonian.num_qubits,
-                ),
-            )
-        weights = [abs(coefficient) for _, coefficient in active_terms]
-        samples = [
-            LCP(
-                {pauli: math.copysign(1.0, coefficient)},
-                num_qubits=hamiltonian.num_qubits,
-            )
-            for pauli, coefficient in active_terms
-        ]
+            return anticommuting_bound_from_samples(weights, samples)
         return pauli_moment_sdp_bound_from_samples(weights, samples)
 
     if not callable(method) and method != "exact":
@@ -205,7 +184,7 @@ def estimate_lch_centered_second_moment_norm(
 def lch_centered_second_moment_pauli_coefficients(
     hamiltonian: LCH,
 ) -> dict[str, complex]:
-    r"""Return the matrix-free Pauli expansion of ``I-(H/Lambda)^2``.
+    r"""Return the matrix-free Pauli expansion of the centered second moment.
 
     This helper exposes the shared symbolic representation so additional
     polynomial-time estimators can be prototyped without constructing
@@ -213,13 +192,13 @@ def lch_centered_second_moment_pauli_coefficients(
     """
     if not isinstance(hamiltonian, LCH):
         raise TypeError("hamiltonian must be an LCH")
-    active_terms = _active_real_pauli_terms(
+    weights, samples = _active_lch_samples(
         hamiltonian,
         method="symbolic Pauli expansion",
     )
-    return _normalized_variance_pauli_coefficients(
-        active_terms,
-        num_qubits=hamiltonian.num_qubits,
+    return _centered_second_moment_pauli_coefficients_from_samples(
+        weights,
+        samples,
     )
 
 
@@ -365,8 +344,8 @@ def estimate_centered_second_moment_norm(
         value = _exact_estimator(decomposition)
     elif method == "contraction_bound":
         # The prepared decomposition is assumed to consist of Hermitian
-        # contractions.  The LCH entry point verifies this from real Pauli
-        # coefficients without materializing matrices.
+        # contractions.  This precondition cannot in general be verified
+        # without computing operator norms.
         value = 1.0 if decomposition.lambda_sum != 0.0 else 0.0
     elif method in {"pauli_l1_bound", "anticommuting_bound", "sdp_bound"}:
         sample_functions = {
@@ -404,58 +383,22 @@ def _exact_estimator(decomposition: QDriftDecomposition) -> float:
     return sparse_operator_norm(centered_second_moment)
 
 
-def _active_real_pauli_terms(
+def _active_lch_samples(
     hamiltonian: LCH,
     *,
     method: object,
-) -> list[tuple[str, float]]:
-    """Return active real Pauli coefficients without materializing matrices."""
-    active_terms: list[tuple[str, float]] = []
-    for coefficient, pauli, _ in hamiltonian.lcp_terms:
+) -> tuple[list[float], list[LCP]]:
+    """Return qDRIFT weights and signed LCP samples without matrices."""
+    weights: list[float] = []
+    samples: list[LCP] = []
+    for coefficient, operator, _ in hamiltonian.lcp_terms:
         if coefficient == 0:
             continue
-        if not np.isfinite(coefficient.real) or not np.isfinite(coefficient.imag):
+        if not np.isfinite(coefficient):
             raise ValueError(f"{method} requires finite LCH coefficients")
-        if coefficient.imag != 0.0:
-            raise ValueError(f"{method} requires real LCH coefficients")
-        active_terms.append((pauli, float(coefficient.real)))
-    return active_terms
-
-
-def _normalized_variance_pauli_coefficients(
-    active_terms: Sequence[tuple[str, float]],
-    *,
-    num_qubits: int,
-) -> dict[str, complex]:
-    r"""Return the Pauli dictionary of ``I - (H/Lambda)^2``.
-
-    Equal product Paulis are accumulated before any absolute values are
-    taken.  Anticommuting cross terms cancel exactly.
-    """
-    maximum_weight = max(
-        (abs(coefficient) for _, coefficient in active_terms),
-        default=0.0,
-    )
-    if maximum_weight == 0.0:
-        return {}
-    scaled_lambda = math.fsum(
-        abs(coefficient) / maximum_weight for _, coefficient in active_terms
-    )
-
-    identity = "I" * num_qubits
-    normalized_terms = [
-        (pauli, (coefficient / maximum_weight) / scaled_lambda)
-        for pauli, coefficient in active_terms
-    ]
-    variance_coefficients: dict[str, complex] = {identity: 1.0 + 0.0j}
-
-    _accumulate_pauli_square(
-        variance_coefficients,
-        normalized_terms,
-        scale=-1.0,
-        identity=identity,
-    )
-    return variance_coefficients
+        weights.append(abs(coefficient))
+        samples.append(math.copysign(1.0, coefficient) * operator)
+    return weights, samples
 
 
 def _centered_second_moment_pauli_coefficients_from_samples(

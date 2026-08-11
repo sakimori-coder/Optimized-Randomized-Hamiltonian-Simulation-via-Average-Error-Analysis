@@ -3,10 +3,10 @@ from fractions import Fraction
 
 import pytest
 
-from commuting_operator_norm_estimator import (
+from grouping import (
     estimate_commuting_operator_norm_upper_bound,
 )
-from lcp import LCP
+from operators import LCP
 
 
 def test_returns_coefficient_one_norm_bound() -> None:
@@ -26,6 +26,32 @@ def test_exact_method_matches_the_known_operator_norm() -> None:
     )
 
     assert sparse_norm == pytest.approx(2.0)
+
+
+def test_frobenius_method_uses_pauli_orthogonality() -> None:
+    hamiltonian = LCP({"ZI": 3.0, "IZ": 4.0})
+
+    frobenius_norm = estimate_commuting_operator_norm_upper_bound(
+        hamiltonian,
+        method="frobenius",
+    )
+
+    assert frobenius_norm == pytest.approx(10.0)
+
+
+def test_frobenius_method_does_not_materialize_a_matrix(monkeypatch) -> None:
+    hamiltonian = LCP({"ZI": 3.0, "IZ": 4.0})
+
+    def fail_if_materialized(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("Frobenius norm must not materialize a matrix")
+
+    monkeypatch.setattr(LCP, "to_csr", fail_if_materialized)
+    monkeypatch.setattr(LCP, "to_matrix", fail_if_materialized)
+
+    assert estimate_commuting_operator_norm_upper_bound(
+        hamiltonian,
+        method="frobenius",
+    ) == pytest.approx(10.0)
 
 
 def test_lp_method_uses_even_pauli_dependency() -> None:

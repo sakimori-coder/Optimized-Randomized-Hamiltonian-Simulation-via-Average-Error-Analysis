@@ -1,7 +1,7 @@
 import pytest
 
-from lcp import LCP
-from rotation_depth import minimum_pauli_rotation_depth
+from operators import LCP
+from grouping.rotation_depth import minimum_pauli_rotation_depth
 
 
 def test_empty_zero_and_identity_terms_have_zero_depth():
