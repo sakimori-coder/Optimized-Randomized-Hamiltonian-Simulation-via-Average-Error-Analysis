@@ -24,11 +24,15 @@ import numpy as np
 
 from grouping import chemistry_depth_one_groups
 from hamiltonians.syk import SykHamiltonianPreset
-from qdrift_metric_comparison import DEFAULT_NUM_WORKERS, run_experiment
+from qdrift_metric_comparison import (
+    DEFAULT_NUM_WORKERS,
+    build_decompositions,
+    run_experiment_from_decompositions,
+)
 from qdrift_trajectory_metrics import TauMEstimate
 
 
-RESULT_FORMAT_VERSION = 1
+RESULT_FORMAT_VERSION = 2
 METRICS = (
     "tau_m_factor",
     "infidelity_factor",
@@ -43,8 +47,7 @@ class SykSweepConfig:
     num_realizations: int = 50
     statevector_max_qubits: int = 15
     coupling_scale: float = 1.0
-    total_time: float = 0.3
-    number_of_steps: int = 20
+    number_of_steps: int = 100
     num_initial_states: int = 20
     num_trajectories: int = 200
     max_group_size: int = 0
@@ -78,14 +81,12 @@ class SykSweepConfig:
             raise ValueError("max_group_size must be non-negative")
         if self.base_seed < 0:
             raise ValueError("base_seed must be non-negative")
-        for name, value in {
-            "coupling_scale": self.coupling_scale,
-            "total_time": self.total_time,
-        }.items():
-            if not math.isfinite(float(value)):
-                raise ValueError(f"{name} must be finite")
-        if self.coupling_scale < 0.0:
-            raise ValueError("coupling_scale must be non-negative")
+        if not math.isfinite(float(self.coupling_scale)):
+            raise ValueError("coupling_scale must be finite")
+        if self.coupling_scale <= 0.0:
+            raise ValueError(
+                "coupling_scale must be positive when lambda_P * t = 1"
+            )
 
     @property
     def total_tasks(self) -> int:
@@ -273,13 +274,19 @@ def run_syk_realization(
     max_group_size = config.effective_max_group_size(task.num_qubits)
 
     if task.num_qubits <= config.statevector_max_qubits:
-        experiment = run_experiment(
+        decompositions = build_decompositions(
             preset,
-            total_time=config.total_time,
+            max_group_size=max_group_size,
+        )
+        pauli_lambda = decompositions.pauli.coefficient_one_norm()
+        grouped_lambda = decompositions.grouped.coefficient_one_norm()
+        evolution_time = _lambda_normalized_time(pauli_lambda)
+        experiment = run_experiment_from_decompositions(
+            decompositions,
+            total_time=evolution_time,
             number_of_steps=config.number_of_steps,
             num_initial_states=config.num_initial_states,
             num_trajectories=config.num_trajectories,
-            max_group_size=max_group_size,
             seed=monte_carlo_seed,
             num_workers=config.num_workers,
             trajectory_chunks_per_state=(
@@ -309,6 +316,9 @@ def run_syk_realization(
             num_pauli_terms,
             num_groups,
         ) = _calculate_tau_only(preset, max_group_size=max_group_size)
+        pauli_lambda = pauli_tau.lambda_sum
+        grouped_lambda = grouped_tau.lambda_sum
+        evolution_time = _lambda_normalized_time(pauli_lambda)
         infidelity_pauli = None
         infidelity_grouped = None
         qpe_pauli = None
@@ -332,6 +342,13 @@ def run_syk_realization(
         "max_group_size": max_group_size,
         "num_pauli_terms": num_pauli_terms,
         "num_groups": num_groups,
+        "evolution_time": evolution_time,
+        "pauli_lambda": pauli_lambda,
+        "grouped_lambda": grouped_lambda,
+        "pauli_lambda_time": pauli_lambda * evolution_time,
+        "grouped_lambda_time": grouped_lambda * evolution_time,
+        "number_of_steps": config.number_of_steps,
+        "step_time": evolution_time / config.number_of_steps,
         "tau_m_pauli": pauli_tau.tau_m,
         "tau_m_grouped": grouped_tau.tau_m,
         "tau_m_factor": _ratio(pauli_tau.tau_m, grouped_tau.tau_m),
@@ -746,6 +763,12 @@ def _ratio(pauli: float, grouped: float) -> float:
     return pauli / grouped
 
 
+def _lambda_normalized_time(pauli_lambda: float) -> float:
+    if not math.isfinite(pauli_lambda) or pauli_lambda <= 0.0:
+        raise ValueError("Pauli lambda must be positive and finite")
+    return 1.0 / pauli_lambda
+
+
 def _optional_ratio(
     pauli: float | None,
     grouped: float | None,
@@ -776,8 +799,7 @@ def _add_config_arguments(parser: ArgumentParser) -> None:
     parser.add_argument("--num-realizations", type=int, default=50)
     parser.add_argument("--statevector-max-qubits", type=int, default=15)
     parser.add_argument("--coupling-scale", type=float, default=1.0)
-    parser.add_argument("--time", type=float, default=0.3)
-    parser.add_argument("--number-of-steps", type=int, default=20)
+    parser.add_argument("--number-of-steps", type=int, default=100)
     parser.add_argument("--num-initial-states", type=int, default=20)
     parser.add_argument("--num-trajectories", type=int, default=200)
     parser.add_argument(
@@ -802,7 +824,6 @@ def _config_from_arguments(arguments: Namespace) -> SykSweepConfig:
         num_realizations=arguments.num_realizations,
         statevector_max_qubits=arguments.statevector_max_qubits,
         coupling_scale=arguments.coupling_scale,
-        total_time=arguments.time,
         number_of_steps=arguments.number_of_steps,
         num_initial_states=arguments.num_initial_states,
         num_trajectories=arguments.num_trajectories,

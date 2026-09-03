@@ -152,6 +152,32 @@ def run_experiment(
         preset,
         max_group_size=max_group_size,
     )
+    return run_experiment_from_decompositions(
+        decompositions,
+        total_time=total_time,
+        number_of_steps=number_of_steps,
+        num_initial_states=num_initial_states,
+        num_trajectories=num_trajectories,
+        seed=seed,
+        num_workers=num_workers,
+        trajectory_chunks_per_state=trajectory_chunks_per_state,
+        initial_state_indices=initial_state_indices,
+    )
+
+
+def run_experiment_from_decompositions(
+    decompositions: QDriftDecompositions,
+    *,
+    total_time: float,
+    number_of_steps: int,
+    num_initial_states: int = 20,
+    num_trajectories: int = 200,
+    seed: int | None = 42,
+    num_workers: int = DEFAULT_NUM_WORKERS,
+    trajectory_chunks_per_state: int | None = None,
+    initial_state_indices: tuple[int, ...] | None = None,
+) -> QDriftMetricExperiment:
+    """Run metrics from already generated/grouped decompositions."""
     pair = (decompositions.pauli, decompositions.grouped)
     trajectory_metrics = tuple(
         estimate_qdrift_haar_trajectory_metrics(

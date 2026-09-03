@@ -42,7 +42,6 @@ def test_sweep_shards_resume_and_aggregate(tmp_path) -> None:
         max_qubits=3,
         num_realizations=2,
         statevector_max_qubits=2,
-        total_time=0.05,
         number_of_steps=2,
         num_initial_states=2,
         num_trajectories=2,
@@ -88,6 +87,10 @@ def test_sweep_shards_resume_and_aggregate(tmp_path) -> None:
 
     assert len(raw) == 4
     assert len(summary) == 6
+    assert all(
+        float(row["pauli_lambda_time"]) == pytest.approx(1.0)
+        for row in raw
+    )
     q2 = [row for row in raw if row["num_qubits"] == "2"]
     q3 = [row for row in raw if row["num_qubits"] == "3"]
     assert all(row["infidelity_factor"] for row in q2)

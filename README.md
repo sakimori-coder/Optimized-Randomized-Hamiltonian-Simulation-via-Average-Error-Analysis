@@ -184,6 +184,13 @@ factor = Pauli qDRIFTの値 / grouped qDRIFTの値
 - 16–50 qubit: `tau(M_p)`のみ（状態ベクトルやqDRIFT軌道は生成しない）
 - 各qubit数: 50 disorder realization
 - `max_group_size`: 各qubit数と同じ値
+- 発展時間: realizationごとに単項Pauli分解の
+  `lambda_P = sum_P |a_P|`を計算し、`t = 1/lambda_P`
+- qDRIFT分割数: `R = 100`
+
+Pauli qDRIFTとgrouped qDRIFTは、比較のため同じ物理発展時間`t`を使います。
+したがって`lambda_P t = 1`であり、grouped側は通常
+`lambda_grouped t < 1`です。
 
 ローカルで小さなpilot実験を行う例です。
 
@@ -194,8 +201,7 @@ uv run --frozen python syk_scaling_experiment.py run \
   --max-qubits 8 \
   --num-realizations 3 \
   --statevector-max-qubits 8 \
-  --time 0.3 \
-  --number-of-steps 20 \
+  --number-of-steps 100 \
   --num-initial-states 20 \
   --num-trajectories 200 \
   --num-workers 8 \
@@ -216,8 +222,7 @@ MEMORY=350gb \
 NUM_WORKERS=96 \
 TAU_WORKERS=8 \
 WALLTIME=48:00:00 \
-TOTAL_TIME=0.3 \
-NUMBER_OF_STEPS=20 \
+NUMBER_OF_STEPS=100 \
 NUM_INITIAL_STATES=20 \
 NUM_TRAJECTORIES=200 \
 ./pbs/submit_syk_scaling.sh
@@ -263,10 +268,11 @@ uv run --frozen python syk_scaling_experiment.py aggregate \
 - `syk_improvement_factors.png` / `.pdf`: 改善率の中央値と10–90%帯
 
 グラフの縦軸は`Pauli / grouped`の対数軸で、1より大きいほどグループ化による改善が
-大きいことを表します。既定の`time=0.3`、`R=20`、`K=20`、`S=200`は計算確認用
-です。最終的な数値実験では、先にpilotでMC標準誤差を確認してから`K`と`S`を増やして
-ください。分母が0になった非有限factorはraw CSVには残しますが、集約統計とグラフ
-からは除外し、`finite_count`列で使用されたrealization数を確認できます。
+大きいことを表します。既定では各realizationで`lambda_P t=1`、
+`R=100`、`K=20`、`S=200`です。最終的な数値実験では、先にpilotでMC標準誤差を
+確認してから`K`と`S`を増やしてください。分母が0になった非有限factorはraw CSV
+には残しますが、集約統計とグラフからは除外し、`finite_count`列で使用された
+realization数を確認できます。
 
 実装確認時の参考値として、50 qubit・1 realizationの`tau(M_p)`計算は約119秒、
 最大RSS約2.2 GBでした（実行環境に依存します）。15 qubitの状態ベクトル側は最小

@@ -33,7 +33,6 @@ uv_executable=${UV_EXECUTABLE:-uv}
     --num-realizations "$NUM_REALIZATIONS" \
     --statevector-max-qubits "$STATEVECTOR_MAX_QUBITS" \
     --coupling-scale "$COUPLING_SCALE" \
-    --time "$TOTAL_TIME" \
     --number-of-steps "$NUMBER_OF_STEPS" \
     --num-initial-states "$NUM_INITIAL_STATES" \
     --num-trajectories "$NUM_TRAJECTORIES" \
