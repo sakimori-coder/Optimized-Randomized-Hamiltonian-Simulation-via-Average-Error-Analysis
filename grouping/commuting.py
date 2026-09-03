@@ -1,163 +1,328 @@
-"""Algorithms for partitioning an LCP into commuting Pauli groups."""
+r"""The fixed chemistry-depth-one grouping used by this project."""
 
 from __future__ import annotations
 
-from typing import Literal
+import math
 
-import networkx as nx
-
-from operators import LCP
+from operators import LCH, LCP
 
 
-GroupingMethod = Literal["greedy", "chemistry"]
+_PACKING_CANDIDATES_PER_SIZE = 16
+_INDEPENDENCE_CANDIDATES = 8
 
 
-def group_commuting_terms(
-    hamiltonian: LCP,
-    *,
-    method: GroupingMethod,
-    max_group_size: int | None = None,
-) -> list[LCP]:
-    """Partition an LCP with the selected deterministic grouping method."""
-    if method == "greedy":
-        return greedy_commuting_groups(
-            hamiltonian,
-            max_group_size=max_group_size,
-        )
-    if method == "chemistry":
-        return chemistry_commuting_groups(
-            hamiltonian,
-            max_group_size=max_group_size,
-        )
-    raise ValueError("method must be 'greedy' or 'chemistry'")
-
-
-def greedy_commuting_groups(
+def build_chemistry_depth1_frobenius_lch(
     hamiltonian: LCP,
     *,
     max_group_size: int | None = None,
-) -> list[LCP]:
-    """Partition an LCP into pairwise-commuting groups.
+) -> LCH:
+    r"""Build the only grouped-qDRIFT decomposition supported here.
 
-    Pauli strings are visited in lexicographic order.  Each term is placed in
-    the largest existing compatible group, or starts a new group when no such
-    group exists.  ``max_group_size=None`` leaves group size uncapped.  The
-    result is deterministic but is not guaranteed to use the minimum possible
-    number of groups.
+    Each depth-one group ``G_g = sum_P a_P P`` gets Frobenius weight
+    ``h_g = sqrt(sum_P a_P**2)`` and sampled operator ``G_g / h_g``.
+    """
+    groups = chemistry_depth_one_groups(
+        hamiltonian,
+        max_group_size=max_group_size,
+    )
+    terms: list[tuple[float, LCP]] = []
+    for group in groups:
+        weight = math.sqrt(
+            math.fsum(value * value for value in group.terms.values())
+        )
+        if weight != 0.0:
+            terms.append((weight, group * (1.0 / weight)))
+    return LCH(terms, num_qubits=hamiltonian.num_qubits)
+
+
+def chemistry_depth_one_groups(
+    hamiltonian: LCP,
+    *,
+    max_group_size: int | None = None,
+) -> list[LCP]:
+    r"""Partition a JW Hamiltonian into commuting depth-one groups in O(nL).
+
+    Canonical four-orbital strings are split into independent A/B packets and
+    packed only across disjoint orbital supports.  Remaining commuting seeds
+    are partitioned by bounded binary-basis insertions.  Every active group is
+    F_2-linearly independent and therefore has Pauli-rotation depth one.
     """
     if not isinstance(hamiltonian, LCP):
         raise TypeError("hamiltonian must be an LCP")
-    group_size_limit = _group_size_limit(max_group_size, len(hamiltonian.terms))
-
-    grouped_terms: list[dict[str, float]] = []
     terms = hamiltonian.terms
-    for pauli in sorted(terms):
-        coefficient = terms[pauli]
-        compatible = [
-            index
-            for index, group in enumerate(grouped_terms)
-            if len(group) < group_size_limit
-            and all(
-                LCP._pauli_strings_commute(pauli, other)
-                for other in group
-            )
-        ]
-        if compatible:
-            selected = max(
-                compatible,
-                key=lambda index: (len(grouped_terms[index]), -index),
-            )
-            grouped_terms[selected][pauli] = coefficient
-        else:
-            grouped_terms.append({pauli: coefficient})
+    if not terms:
+        return []
+    group_size_limit = _group_size_limit(max_group_size, len(terms))
 
+    four_orbital_terms: dict[
+        tuple[tuple[int, ...], int, int],
+        list[tuple[str, float]],
+    ] = {}
+    remaining_seed_terms: dict[
+        tuple[tuple[int, ...], int],
+        list[tuple[str, float]],
+    ] = {}
+    for pauli, coefficient in terms.items():
+        support, y_parity, packet = _pauli_key(pauli)
+        if packet is None:
+            remaining_seed_terms.setdefault(
+                (support, y_parity), []
+            ).append((pauli, coefficient))
+        else:
+            four_orbital_terms.setdefault(
+                (support, y_parity, packet), []
+            ).append((pauli, coefficient))
+
+    fragments: list[
+        tuple[dict[str, float], tuple[int, ...], int, int, int]
+    ] = []
+    for (support, y_parity, packet), items in four_orbital_terms.items():
+        ordered = sorted(items, key=lambda item: (-abs(item[1]), item[0]))
+        for chunk_index, fragment in enumerate(
+            _chunk_items(ordered, group_size_limit)
+        ):
+            fragments.append(
+                (fragment, support, y_parity, packet, chunk_index)
+            )
+    fragments.sort(
+        key=lambda item: (
+            -round(sum(abs(value) for value in item[0].values()), 12),
+            -len(item[0]),
+            item[1],
+            item[2],
+            item[3],
+            item[4],
+        )
+    )
+    grouped_terms = _pack_disjoint_fragments(
+        [(fragment, support) for fragment, support, _, _, _ in fragments],
+        num_qubits=hamiltonian.num_qubits,
+        group_size_limit=group_size_limit,
+    )
+    for items in remaining_seed_terms.values():
+        grouped_terms.extend(
+            _independent_seed_groups(
+                items,
+                group_size_limit=group_size_limit,
+            )
+        )
     return [
         LCP(group, num_qubits=hamiltonian.num_qubits)
         for group in grouped_terms
     ]
 
 
-def chemistry_commuting_groups(
-    hamiltonian: LCP,
+def _pauli_key(pauli: str) -> tuple[tuple[int, ...], int, int | None]:
+    support: list[int] = []
+    active_symbols: list[str] = []
+    z_mask = 0
+    number_of_y = 0
+    for qubit, symbol in enumerate(pauli):
+        if symbol in "XY":
+            support.append(qubit)
+            active_symbols.append(symbol)
+            number_of_y += symbol == "Y"
+        elif symbol == "Z":
+            z_mask |= 1 << qubit
+    support_tuple = tuple(support)
+    y_parity = number_of_y % 2
+    if len(support) != 4:
+        return support_tuple, y_parity, None
+
+    first, second, third, fourth = support
+    expected_z_mask = (
+        _integer_range_mask(first + 1, second)
+        | _integer_range_mask(third + 1, fourth)
+    )
+    if z_mask != expected_z_mask:
+        return support_tuple, y_parity, None
+    if y_parity == 1:
+        packet = 0 if number_of_y == 1 else 1
+    elif number_of_y == 0:
+        packet = 0
+    elif number_of_y == 4:
+        packet = 1
+    else:
+        packet = 0 if active_symbols[0] == "Y" else 1
+    return support_tuple, y_parity, packet
+
+
+def _integer_range_mask(start: int, stop: int) -> int:
+    return ((1 << stop) - 1) ^ ((1 << start) - 1)
+
+
+def _pack_disjoint_fragments(
+    fragments: list[tuple[dict[str, float], tuple[int, ...]]],
     *,
-    max_group_size: int | None = None,
-) -> list[LCP]:
-    r"""Group a Jordan--Wigner molecular Hamiltonian by orbital support.
-
-    For a Pauli string ``P``, define its non-diagonal support as
-    ``S(P) = {q: P[q] is X or Y}``.  Strings with equal
-    ``(S(P), number_of_Y(P) mod 2)`` commute, so they first form indivisible
-    seed fragments.  This naturally collects the Z-only sector, hopping and
-    controlled-hopping terms with the same orbital pair, and double
-    excitations with the same four-orbital support.
-
-    The Z-only sector is kept separate.  Four-orbital seed fragments with
-    disjoint supports are packed first as a Baranyai-type heuristic.  The
-    remaining fragments are then processed in descending coefficient
-    one-norm and inserted into the first fully commuting compatible group.
-    This last step is a deterministic sorted-insertion heuristic, not an
-    optimal graph coloring.
-
-    The Z-only sector always remains one group.  ``max_group_size`` is a
-    project-specific practical cap for the non-diagonal seed fragments; it
-    may therefore be exceeded by the Z-only group.  ``None`` leaves all
-    chemistry-derived groups uncapped.
-    """
-    if not isinstance(hamiltonian, LCP):
-        raise TypeError("hamiltonian must be an LCP")
-
-    terms = hamiltonian.terms
-    group_size_limit = _group_size_limit(max_group_size, len(terms))
-    if not terms:
+    num_qubits: int,
+    group_size_limit: int,
+) -> list[dict[str, float]]:
+    if not fragments:
         return []
-
-    ordered_paulis = sorted(
-        terms,
-        key=lambda pauli: (-abs(terms[pauli]), pauli),
-    )
-    seed_terms: dict[tuple[tuple[int, ...], int], list[tuple[str, float]]] = {}
-    for pauli in ordered_paulis:
-        support = tuple(
-            qubit
-            for qubit, symbol in enumerate(pauli)
-            if symbol in "XY"
-        )
-        key = (support, pauli.count("Y") % 2)
-        seed_terms.setdefault(key, []).append((pauli, terms[pauli]))
-
-    z_only_items = seed_terms.pop(((), 0), [])
-    z_only_groups = [dict(z_only_items)] if z_only_items else []
-
-    four_orbital_fragments: list[tuple[dict[str, float], frozenset[int]]] = []
-    other_fragments: list[dict[str, float]] = []
-    for (support, _), items in sorted(seed_terms.items()):
-        for fragment in _chunk_items(items, group_size_limit):
-            if len(support) == 4:
-                four_orbital_fragments.append(
-                    (fragment, frozenset(support))
-                )
-            else:
-                other_fragments.append(fragment)
-
-    baranyai_fragments = _pack_disjoint_four_orbital_fragments(
-        four_orbital_fragments,
-        group_size_limit,
-    )
-    merged_groups = _merge_fully_commuting_fragments(
-        [*baranyai_fragments, *other_fragments],
-        group_size_limit,
-    )
-
-    return [
-        LCP(group, num_qubits=hamiltonian.num_qubits)
-        for group in [*z_only_groups, *merged_groups]
+    maximum_open_size = min(group_size_limit - 1, num_qubits)
+    groups: list[dict[str, float]] = []
+    used_orbitals: list[set[int]] = []
+    bucket_positions: list[int] = []
+    size_buckets: list[list[int]] = [
+        [] for _ in range(maximum_open_size + 1)
     ]
+    nonempty_size_mask = 0
+
+    def add_to_bucket(group_index: int) -> None:
+        nonlocal nonempty_size_mask
+        size = len(groups[group_index])
+        bucket_positions[group_index] = len(size_buckets[size])
+        size_buckets[size].append(group_index)
+        nonempty_size_mask |= 1 << size
+
+    def remove_from_bucket(group_index: int, size: int) -> None:
+        nonlocal nonempty_size_mask
+        bucket = size_buckets[size]
+        position = bucket_positions[group_index]
+        last_index = bucket.pop()
+        if position < len(bucket):
+            bucket[position] = last_index
+            bucket_positions[last_index] = position
+        bucket_positions[group_index] = -1
+        if not bucket:
+            nonempty_size_mask &= ~(1 << size)
+
+    for fragment, support in fragments:
+        fragment_size = len(fragment)
+        largest_size = min(
+            maximum_open_size,
+            group_size_limit - fragment_size,
+        )
+        selected: int | None = None
+        eligible_sizes = nonempty_size_mask & (
+            (1 << (largest_size + 1)) - 2
+        )
+        while eligible_sizes:
+            size = eligible_sizes.bit_length() - 1
+            eligible_sizes ^= 1 << size
+            bucket = size_buckets[size]
+            first_position = max(
+                -1,
+                len(bucket) - _PACKING_CANDIDATES_PER_SIZE - 1,
+            )
+            for position in range(len(bucket) - 1, first_position, -1):
+                group_index = bucket[position]
+                if used_orbitals[group_index].isdisjoint(support):
+                    selected = group_index
+                    break
+            if selected is not None:
+                break
+
+        if selected is None:
+            group_index = len(groups)
+            groups.append(dict(fragment))
+            used_orbitals.append(set(support))
+            bucket_positions.append(-1)
+            if (
+                fragment_size < group_size_limit
+                and len(support) + 4 <= num_qubits
+            ):
+                add_to_bucket(group_index)
+            continue
+
+        old_size = len(groups[selected])
+        remove_from_bucket(selected, old_size)
+        groups[selected].update(fragment)
+        used_orbitals[selected].update(support)
+        if (
+            len(groups[selected]) < group_size_limit
+            and len(used_orbitals[selected]) + 4 <= num_qubits
+        ):
+            add_to_bucket(selected)
+    return groups
 
 
-def _group_size_limit(
-    max_group_size: int | None,
-    num_terms: int,
-) -> int:
+def _independent_seed_groups(
+    terms: list[tuple[str, float]],
+    *,
+    group_size_limit: int,
+) -> list[dict[str, float]]:
+    groups: list[dict[str, float]] = []
+    bases: list[tuple[int, ...]] = []
+    open_group_indices: list[int] = []
+    open_positions: list[int] = []
+
+    def remove_open_group(group_index: int) -> None:
+        position = open_positions[group_index]
+        last_index = open_group_indices.pop()
+        if position < len(open_group_indices):
+            open_group_indices[position] = last_index
+            open_positions[last_index] = position
+        open_positions[group_index] = -1
+
+    for pauli, coefficient in _radix_sort_pauli_items(terms):
+        vector = (
+            0
+            if coefficient == 0.0 or all(symbol == "I" for symbol in pauli)
+            else _pauli_to_binary_vector(pauli)
+        )
+        selected: int | None = None
+        extended_basis: tuple[int, ...] | None = None
+        first_position = max(
+            -1,
+            len(open_group_indices) - _INDEPENDENCE_CANDIDATES - 1,
+        )
+        for position in range(len(open_group_indices) - 1, first_position, -1):
+            group_index = open_group_indices[position]
+            candidate_basis = (
+                bases[group_index]
+                if vector == 0
+                else _extend_binary_basis(bases[group_index], vector)
+            )
+            if vector == 0 or len(candidate_basis) > len(bases[group_index]):
+                selected = group_index
+                extended_basis = candidate_basis
+                break
+
+        if selected is None:
+            group_index = len(groups)
+            groups.append({pauli: coefficient})
+            bases.append(() if vector == 0 else (vector,))
+            open_positions.append(-1)
+            if group_size_limit > 1:
+                open_positions[group_index] = len(open_group_indices)
+                open_group_indices.append(group_index)
+            continue
+
+        groups[selected][pauli] = coefficient
+        assert extended_basis is not None
+        bases[selected] = extended_basis
+        if len(groups[selected]) >= group_size_limit:
+            remove_open_group(selected)
+    return groups
+
+
+def _pauli_to_binary_vector(pauli: str) -> int:
+    num_qubits = len(pauli)
+    vector = 0
+    for qubit, symbol in enumerate(pauli):
+        if symbol in "XY":
+            vector |= 1 << qubit
+        if symbol in "YZ":
+            vector |= 1 << (num_qubits + qubit)
+    return vector
+
+
+def _extend_binary_basis(
+    basis: tuple[int, ...],
+    vector: int,
+) -> tuple[int, ...]:
+    for row in basis:
+        vector = min(vector, vector ^ row)
+    if vector == 0:
+        return basis
+    rows = [min(row, row ^ vector) for row in basis]
+    rows.append(vector)
+    rows.sort(reverse=True)
+    return tuple(rows)
+
+
+def _group_size_limit(max_group_size: int | None, num_terms: int) -> int:
     if max_group_size is None:
         return max(1, num_terms)
     if not isinstance(max_group_size, int) or isinstance(max_group_size, bool):
@@ -177,120 +342,24 @@ def _chunk_items(
     ]
 
 
-def _fragment_sort_key(
-    fragment: dict[str, float],
-) -> tuple[float, int, tuple[str, ...]]:
-    return (
-        -sum(abs(coefficient) for coefficient in fragment.values()),
-        -len(fragment),
-        tuple(sorted(fragment)),
-    )
-
-
-def _fragments_commute(
-    left: dict[str, float],
-    right: dict[str, float],
-) -> bool:
-    return all(
-        LCP._pauli_strings_commute(left_pauli, right_pauli)
-        for left_pauli in left
-        for right_pauli in right
-    )
-
-
-def _pack_disjoint_four_orbital_fragments(
-    fragments: list[tuple[dict[str, float], frozenset[int]]],
-    group_size_limit: int,
-) -> list[dict[str, float]]:
-    packed: list[tuple[dict[str, float], set[int]]] = []
-    for fragment, support in sorted(
-        fragments,
-        key=lambda item: (_fragment_sort_key(item[0]), tuple(item[1])),
-    ):
-        for group, used_orbitals in packed:
-            if (
-                len(group) + len(fragment) <= group_size_limit
-                and used_orbitals.isdisjoint(support)
-                and _fragments_commute(group, fragment)
-            ):
-                group.update(fragment)
-                used_orbitals.update(support)
-                break
-        else:
-            packed.append((dict(fragment), set(support)))
-    return [group for group, _ in packed]
-
-
-def _merge_fully_commuting_fragments(
-    fragments: list[dict[str, float]],
-    group_size_limit: int,
-) -> list[dict[str, float]]:
-    groups: list[dict[str, float]] = []
-    for fragment in sorted(fragments, key=_fragment_sort_key):
-        for group in groups:
-            if (
-                len(group) + len(fragment) <= group_size_limit
-                and _fragments_commute(group, fragment)
-            ):
-                group.update(fragment)
-                break
-        else:
-            groups.append(dict(fragment))
-    return groups
-
-
-def decompose_into_commuting_groups(hamiltonian: LCP) -> list[LCP]:
-    """Partition a Hamiltonian into pairwise-commuting LCP Hamiltonians.
-
-    Maximal cliques of the commutation graph are enumerated with NetworkX's
-    Bron--Kerbosch-based ``find_cliques`` implementation.  A greedy clique
-    cover is then constructed: at each step, the clique containing the most
-    as-yet-unassigned Pauli strings is selected.
-
-    Every Pauli term is assigned to exactly one returned group, so the sum of
-    the groups equals ``hamiltonian``.  The number of groups is not guaranteed
-    to be minimal.
-
-    Args:
-        hamiltonian: LCP Hamiltonian to decompose.
-
-    Returns:
-        A list of LCP Hamiltonians.  All Pauli strings within each element
-        commute pairwise.  An empty Hamiltonian produces an empty list.
-    """
-    if not isinstance(hamiltonian, LCP):
-        raise TypeError("hamiltonian must be an LCP")
-
-    graph = hamiltonian.commutation_graph()
-    if graph.number_of_nodes() == 0:
-        return []
-
-    maximal_cliques = [frozenset(clique) for clique in nx.find_cliques(graph)]
-    unassigned = set(graph.nodes)
-    groups: list[LCP] = []
-    terms = hamiltonian.terms
-
-    while unassigned:
-        # The secondary key makes ties deterministic with respect to the
-        # order returned by find_cliques.
-        _, selected_clique = max(
-            enumerate(maximal_cliques),
-            key=lambda item: (
-                len(item[1] & unassigned),
-                -item[0],
-            ),
-        )
-
-        selected_paulis = [
-            pauli_string
-            for pauli_string in terms
-            if pauli_string in selected_clique and pauli_string in unassigned
-        ]
-        group_terms = {
-            pauli_string: terms[pauli_string]
-            for pauli_string in selected_paulis
+def _radix_sort_pauli_items(
+    items: list[tuple[str, float]],
+) -> list[tuple[str, float]]:
+    if len(items) < 2:
+        return list(items)
+    ordered = list(items)
+    alphabet = "IXYZ"
+    for qubit in range(len(ordered[0][0]) - 1, -1, -1):
+        buckets: dict[str, list[tuple[str, float]]] = {
+            symbol: [] for symbol in alphabet
         }
-        groups.append(LCP(group_terms, num_qubits=hamiltonian.num_qubits))
-        unassigned.difference_update(selected_paulis)
+        for item in ordered:
+            buckets[item[0][qubit]].append(item)
+        ordered = [item for symbol in alphabet for item in buckets[symbol]]
+    return ordered
 
-    return groups
+
+__all__ = [
+    "build_chemistry_depth1_frobenius_lch",
+    "chemistry_depth_one_groups",
+]

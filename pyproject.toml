@@ -1,12 +1,11 @@
 [project]
 name = "my-project"
 version = "0.1.0"
-description = "Add your description here"
+description = "Pauli versus chemistry-depth1/Frobenius qDRIFT metric comparison"
 readme = "README.md"
 requires-python = ">=3.10.11"
 dependencies = [
-    "cvxpy>=1.4",
-    "networkx>=3.0",
+    "matplotlib>=3.7",
     "numpy>=1.24",
     "openfermion>=1.7,<2",
     "openfermionpyscf>=0.5,<0.6",

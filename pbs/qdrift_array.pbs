@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N qdrift_metrics
+#PBS -j oe
+
+set -euo pipefail
+
+: "${PROJECT_DIR:?PROJECT_DIR was not exported by pbs/submit.sh}"
+: "${RESULT_DIR:?RESULT_DIR was not exported by pbs/submit.sh}"
+: "${NUM_SHARDS:?NUM_SHARDS was not exported by pbs/submit.sh}"
+: "${PBS_ARRAY_INDEX:?This worker must be submitted as a PBS array job}"
+
+cd "$PROJECT_DIR"
+
+if [[ -n "${PBS_ENV_SCRIPT:-}" ]]; then
+    # Site-specific module/virtual-environment setup can live in this file.
+    # shellcheck source=/dev/null
+    source "$PBS_ENV_SCRIPT"
+fi
+
+array_index=$PBS_ARRAY_INDEX
+if ! [[ "$array_index" =~ ^[1-9][0-9]*$ ]]; then
+    echo "PBS_ARRAY_INDEX must be a positive integer, got: $array_index" >&2
+    exit 2
+fi
+shard_index=$((array_index - 1))
+
+arguments=(
+    --time "$TOTAL_TIME"
+    --number-of-steps "$NUMBER_OF_STEPS"
+    --num-initial-states "$NUM_INITIAL_STATES"
+    --num-trajectories "$NUM_TRAJECTORIES"
+    --max-group-size "$MAX_GROUP_SIZE"
+    --seed "$SEED"
+    --num-workers "$NUM_WORKERS"
+    --trajectory-chunks-per-state "$TRAJECTORY_CHUNKS_PER_STATE"
+    --shard-index "$shard_index"
+    --num-shards "$NUM_SHARDS"
+    --partial-output-dir "$RESULT_DIR"
+)
+
+case "$SOURCE_KIND" in
+    molecule)
+        arguments+=(--hamiltonian "$HAMILTONIAN")
+        ;;
+    syk)
+        arguments+=(
+            --syk-qubits "$SYK_QUBITS"
+            --syk-coupling-scale "$SYK_COUPLING_SCALE"
+            --syk-seed "$SYK_SEED"
+        )
+        ;;
+    *)
+        echo "SOURCE_KIND must be molecule or syk, got: $SOURCE_KIND" >&2
+        exit 2
+        ;;
+esac
+
+uv_executable=${UV_EXECUTABLE:-uv}
+"$uv_executable" run --frozen python -u qdrift_metric_comparison.py \
+    "${arguments[@]}"

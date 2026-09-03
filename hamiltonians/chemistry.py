@@ -10,6 +10,7 @@ contributes only a global phase.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 from functools import lru_cache
@@ -25,6 +26,13 @@ from operators import LCP
 
 Atom: TypeAlias = tuple[str, tuple[float, float, float]]
 Geometry: TypeAlias = tuple[Atom, ...]
+
+
+# OpenFermion's own ``SymbolicOperator.compress`` uses 1e-8 as its default
+# roundoff tolerance.  Keep that tolerance only for the forbidden imaginary
+# part: real coefficients continue to use the user-selected coefficient
+# cutoff, which is 1e-12 by default.
+_HERMITICITY_ROUNDOFF_TOLERANCE = 1e-8
 
 
 def _normalized_geometry(
@@ -131,36 +139,6 @@ class MolecularHamiltonianPreset:
             tolerance,
         )
 
-    @property
-    def num_qubits(self) -> int:
-        return self.generate().num_qubits
-
-    @property
-    def terms(self) -> tuple[tuple[float, str], ...]:
-        return self.generate().terms
-
-    @property
-    def identity_pauli(self) -> str:
-        return self.generate().identity_pauli
-
-    @property
-    def identity_coefficient(self) -> float:
-        return self.generate().identity_coefficient
-
-    def to_lcp(
-        self,
-        *,
-        include_identity: bool = False,
-        coefficient_tolerance: float = 1e-12,
-    ) -> LCP:
-        """Generate an LCP, optionally retaining the identity term."""
-        return self.generate(
-            coefficient_tolerance=coefficient_tolerance,
-        ).to_lcp(
-            include_identity=include_identity,
-        )
-
-
 H2_STO3G_JW = MolecularHamiltonianPreset(
     name="h2_sto3g_jw",
     description=(
@@ -203,38 +181,189 @@ H2O_STO3G_CAS_4E_4O_JW = MolecularHamiltonianPreset(
 )
 
 
-def hydrogen_chain_preset(
-    num_atoms: int,
-    *,
-    spacing: float = 1.0,
-) -> MolecularHamiltonianPreset:
-    """Construct an equally spaced hydrogen chain in the full STO-3G space."""
-    if not isinstance(num_atoms, int) or isinstance(num_atoms, bool):
-        raise TypeError("num_atoms must be an integer")
-    if num_atoms <= 0:
-        raise ValueError("num_atoms must be positive")
-    spacing = float(spacing)
-    if spacing <= 0.0:
-        raise ValueError("spacing must be positive")
-
-    return MolecularHamiltonianPreset(
-        name=f"h{num_atoms}_chain_sto3g_full_jw",
-        description=(
-            f"H{num_atoms} linear chain, spacing {spacing} angstrom, "
-            "full STO-3G orbital space, Jordan-Wigner"
-        ),
-        geometry=tuple(
-            ("H", (0.0, 0.0, atom_index * spacing))
-            for atom_index in range(num_atoms)
-        ),
-        multiplicity=1 if num_atoms % 2 == 0 else 2,
+def _linear_symmetric_geometry(
+    center: str,
+    outer: str,
+    bond_length: float,
+) -> Geometry:
+    """Return ``outer-center-outer`` on the z axis."""
+    return (
+        (outer, (0.0, 0.0, -bond_length)),
+        (center, (0.0, 0.0, 0.0)),
+        (outer, (0.0, 0.0, bond_length)),
     )
+
+
+def _bent_symmetric_geometry(
+    center: str,
+    outer: str,
+    bond_length: float,
+    angle_degrees: float,
+) -> Geometry:
+    """Return a planar two-bond geometry symmetric about the z axis."""
+    half_angle = math.radians(angle_degrees / 2.0)
+    transverse = bond_length * math.sin(half_angle)
+    longitudinal = bond_length * math.cos(half_angle)
+    return (
+        (center, (0.0, 0.0, 0.0)),
+        (outer, (transverse, 0.0, longitudinal)),
+        (outer, (-transverse, 0.0, longitudinal)),
+    )
+
+
+def _tetrahedral_geometry(bond_length: float) -> Geometry:
+    """Return methane with a carbon at the origin."""
+    coordinate = bond_length / math.sqrt(3.0)
+    return (
+        ("C", (0.0, 0.0, 0.0)),
+        ("H", (coordinate, coordinate, coordinate)),
+        ("H", (-coordinate, -coordinate, coordinate)),
+        ("H", (-coordinate, coordinate, -coordinate)),
+        ("H", (coordinate, -coordinate, -coordinate)),
+    )
+
+
+def _trigonal_pyramidal_geometry(
+    bond_length: float,
+    angle_degrees: float,
+) -> Geometry:
+    """Return a C3v ammonia geometry with nitrogen at the origin."""
+    bond_angle = math.radians(angle_degrees)
+    polar_cosine_squared = (2.0 * math.cos(bond_angle) + 1.0) / 3.0
+    polar_cosine = math.sqrt(polar_cosine_squared)
+    radius = bond_length * math.sqrt(1.0 - polar_cosine_squared)
+    height = bond_length * polar_cosine
+    hydrogens = tuple(
+        (
+            "H",
+            (
+                radius * math.cos(2.0 * math.pi * index / 3.0),
+                radius * math.sin(2.0 * math.pi * index / 3.0),
+                height,
+            ),
+        )
+        for index in range(3)
+    )
+    return (("N", (0.0, 0.0, 0.0)), *hydrogens)
+
+
+def _benzene_geometry(
+    carbon_carbon_distance: float,
+    carbon_hydrogen_distance: float,
+) -> Geometry:
+    """Return a planar D6h benzene geometry centered at the origin."""
+    hydrogen_radius = carbon_carbon_distance + carbon_hydrogen_distance
+    carbons = tuple(
+        (
+            "C",
+            (
+                carbon_carbon_distance
+                * math.cos(math.pi * index / 3.0),
+                carbon_carbon_distance
+                * math.sin(math.pi * index / 3.0),
+                0.0,
+            ),
+        )
+        for index in range(6)
+    )
+    hydrogens = tuple(
+        (
+            "H",
+            (
+                hydrogen_radius * math.cos(math.pi * index / 3.0),
+                hydrogen_radius * math.sin(math.pi * index / 3.0),
+                0.0,
+            ),
+        )
+        for index in range(6)
+    )
+    return carbons + hydrogens
+
+
+NH3_STO3G_FULL_JW = MolecularHamiltonianPreset(
+    name="nh3_sto3g_full_jw",
+    description=(
+        "NH3, N-H distance 1.012 angstrom, angle 106.7 degrees, full "
+        "STO-3G orbital space, Jordan-Wigner, 16 qubits"
+    ),
+    geometry=_trigonal_pyramidal_geometry(1.012, 106.7),
+)
+
+CH4_STO3G_FULL_JW = MolecularHamiltonianPreset(
+    name="ch4_sto3g_full_jw",
+    description=(
+        "CH4, tetrahedral C-H distance 1.087 angstrom, full STO-3G "
+        "orbital space, Jordan-Wigner, 18 qubits"
+    ),
+    geometry=_tetrahedral_geometry(1.087),
+)
+
+CO_STO3G_FULL_JW = MolecularHamiltonianPreset(
+    name="co_sto3g_full_jw",
+    description=(
+        "CO, bond length 1.128 angstrom, full STO-3G orbital space, "
+        "Jordan-Wigner, 20 qubits"
+    ),
+    geometry=(
+        ("C", (0.0, 0.0, 0.0)),
+        ("O", (0.0, 0.0, 1.128)),
+    ),
+)
+
+H2S_STO3G_FULL_JW = MolecularHamiltonianPreset(
+    name="h2s_sto3g_full_jw",
+    description=(
+        "H2S, S-H distance 1.336 angstrom, angle 92.1 degrees, full "
+        "STO-3G orbital space, Jordan-Wigner, 22 qubits"
+    ),
+    geometry=_bent_symmetric_geometry("S", "H", 1.336, 92.1),
+)
+
+C2H2_STO3G_FULL_JW = MolecularHamiltonianPreset(
+    name="c2h2_sto3g_full_jw",
+    description=(
+        "C2H2, C-C distance 1.203 angstrom, C-H distance 1.060 angstrom, "
+        "full STO-3G orbital space, Jordan-Wigner, 24 qubits"
+    ),
+    geometry=(
+        ("H", (0.0, 0.0, -1.6615)),
+        ("C", (0.0, 0.0, -0.6015)),
+        ("C", (0.0, 0.0, 0.6015)),
+        ("H", (0.0, 0.0, 1.6615)),
+    ),
+)
+
+CO2_STO3G_FULL_JW = MolecularHamiltonianPreset(
+    name="co2_sto3g_full_jw",
+    description=(
+        "CO2, linear C-O distance 1.160 angstrom, full STO-3G orbital "
+        "space, Jordan-Wigner, 30 qubits"
+    ),
+    geometry=_linear_symmetric_geometry("C", "O", 1.160),
+)
+
+C6H6_STO3G_FULL_JW = MolecularHamiltonianPreset(
+    name="c6h6_sto3g_full_jw",
+    description=(
+        "C6H6, planar D6h geometry with C-C distance 1.397 angstrom and "
+        "C-H distance 1.090 angstrom, full STO-3G orbital space, "
+        "Jordan-Wigner, 72 qubits"
+    ),
+    geometry=_benzene_geometry(1.397, 1.090),
+)
 
 
 MOLECULAR_HAMILTONIANS: dict[str, MolecularHamiltonianPreset] = {
     H2_STO3G_JW.name: H2_STO3G_JW,
     LIH_STO3G_ACTIVE_JW.name: LIH_STO3G_ACTIVE_JW,
     H2O_STO3G_CAS_4E_4O_JW.name: H2O_STO3G_CAS_4E_4O_JW,
+    NH3_STO3G_FULL_JW.name: NH3_STO3G_FULL_JW,
+    CH4_STO3G_FULL_JW.name: CH4_STO3G_FULL_JW,
+    CO_STO3G_FULL_JW.name: CO_STO3G_FULL_JW,
+    H2S_STO3G_FULL_JW.name: H2S_STO3G_FULL_JW,
+    C2H2_STO3G_FULL_JW.name: C2H2_STO3G_FULL_JW,
+    CO2_STO3G_FULL_JW.name: CO2_STO3G_FULL_JW,
+    C6H6_STO3G_FULL_JW.name: C6H6_STO3G_FULL_JW,
 }
 
 
@@ -243,24 +372,40 @@ def _pauli_terms_from_qubit_operator(
     *,
     num_qubits: int,
     coefficient_tolerance: float,
+    project_hermitian: bool = False,
 ) -> tuple[tuple[float, str], ...]:
-    """Convert OpenFermion's indexed terms to q_(n-1)...q_0 strings."""
+    """Convert OpenFermion's indexed terms to q_(n-1)...q_0 strings.
+
+    ``project_hermitian=True`` takes the Hermitian part by retaining the real
+    coefficient of each Hermitian Pauli basis element.  This is used only for
+    molecular Hamiltonians constructed from real PySCF integrals.  Generic
+    callers retain the explicit imaginary-coefficient validation.
+    """
     converted: list[tuple[float, str]] = []
     for indexed_paulis, raw_coefficient in qubit_hamiltonian.terms.items():
         coefficient = complex(raw_coefficient)
-        if abs(coefficient) <= coefficient_tolerance:
-            continue
-        if abs(coefficient.imag) > coefficient_tolerance:
+        imaginary_tolerance = max(
+            coefficient_tolerance,
+            _HERMITICITY_ROUNDOFF_TOLERANCE,
+            1e-12 * abs(coefficient.real),
+        )
+        if (
+            not project_hermitian
+            and abs(coefficient.imag) > imaginary_tolerance
+        ):
             raise ValueError("Jordan-Wigner Hamiltonian has a complex coefficient")
+        real_coefficient = float(coefficient.real)
+        if abs(real_coefficient) <= coefficient_tolerance:
+            continue
 
         symbols = ["I"] * num_qubits
         for qubit, symbol in indexed_paulis:
             symbols[num_qubits - 1 - qubit] = symbol
-        converted.append((float(coefficient.real), "".join(symbols)))
+        converted.append((real_coefficient, "".join(symbols)))
     return tuple(sorted(converted, key=lambda term: term[1]))
 
 
-@lru_cache(maxsize=8)
+@lru_cache(maxsize=16)
 def _generate_molecular_hamiltonian(
     geometry: Geometry,
     basis: str,
@@ -302,36 +447,7 @@ def _generate_molecular_hamiltonian(
             qubit_hamiltonian,
             num_qubits=num_qubits,
             coefficient_tolerance=coefficient_tolerance,
+            project_hermitian=True,
         ),
         hartree_fock_energy=float(molecule.hf_energy),
-    )
-
-
-def generate_molecular_lcp(
-    geometry: Sequence[tuple[str, Sequence[float]]],
-    *,
-    basis: str = "sto-3g",
-    multiplicity: int = 1,
-    charge: int = 0,
-    occupied_indices: Sequence[int] | None = None,
-    active_indices: Sequence[int] | None = None,
-    include_identity: bool = False,
-    coefficient_tolerance: float = 1e-12,
-) -> LCP:
-    """Generate an LCP for an arbitrary molecule from its geometry."""
-    preset = MolecularHamiltonianPreset(
-        name="custom",
-        description="dynamically generated molecular Hamiltonian",
-        geometry=_normalized_geometry(geometry),
-        basis=basis,
-        multiplicity=multiplicity,
-        charge=charge,
-        occupied_indices=(
-            None if occupied_indices is None else tuple(occupied_indices)
-        ),
-        active_indices=None if active_indices is None else tuple(active_indices),
-    )
-    return preset.to_lcp(
-        include_identity=include_identity,
-        coefficient_tolerance=coefficient_tolerance,
     )

@@ -1,21 +1,11 @@
-"""Hamiltonian generators grouped by problem family.
+"""Supported molecular and SYK Hamiltonians."""
 
-Molecular generators live in :mod:`hamiltonians.chemistry` because they use
-optional PySCF and OpenFermion dependencies.
-"""
-
-from hamiltonians.pauli import build_lch_from_lcp_unit_cost
-from hamiltonians.physics import (
-    heisenberg_chain,
-    schwinger_model,
-    transverse_field_ising_chain,
-)
-from hamiltonians.random import build_random_lcp
+from .pauli import SinglePauliLCH, build_lch_from_lcp_unit_cost
+from .syk import GeneratedSykHamiltonian, SykHamiltonianPreset
 
 __all__ = [
+    "GeneratedSykHamiltonian",
+    "SinglePauliLCH",
+    "SykHamiltonianPreset",
     "build_lch_from_lcp_unit_cost",
-    "build_random_lcp",
-    "heisenberg_chain",
-    "schwinger_model",
-    "transverse_field_ising_chain",
 ]
