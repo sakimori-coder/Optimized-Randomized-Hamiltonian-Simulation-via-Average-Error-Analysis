@@ -265,9 +265,9 @@ uv run --frozen python syk_scaling_experiment.py aggregate \
 
 - `syk_realizations.csv`: 全realizationのPauli値、grouped値、改善率、MC標準誤差
 - `syk_summary.csv`: qubit数・指標ごとの平均、標準誤差、中央値、四分位、10–90%点
-- `syk_improvement_factors.png` / `.pdf`: 改善率の中央値と10–90%帯
+- `syk_improvement_factors.png` / `.pdf`: 改善率の中央値を結んだ線形軸グラフ
 
-グラフの縦軸は`Pauli / grouped`の対数軸で、1より大きいほどグループ化による改善が
+グラフの縦軸は`Pauli / grouped`の線形軸で、1より大きいほどグループ化による改善が
 大きいことを表します。既定では各realizationで`lambda_P t=1`、
 `R=100`、`K=20`、`S=200`です。最終的な数値実験では、先にpilotでMC標準誤差を
 確認してから`K`と`S`を増やしてください。分母が0になった非有限factorはraw CSV
@@ -278,3 +278,73 @@ realization数を確認できます。
 最大RSS約2.2 GBでした（実行環境に依存します）。15 qubitの状態ベクトル側は最小
 条件`K=1, S=2, R=1`でも約54秒だったため、全条件を投入する前に5–15 qubitの
 pilotでwalltimeを測ることを推奨します。
+
+## 分子ベンチマーク sweep
+
+`molecular_scaling_experiment.py`は次の固定系列を比較します。すべてfull orbital
+spaceでJordan–Wigner変換します。
+
+| 系 | 基底/active space | qubit | 計算する改善率 |
+|---|---|---:|---|
+| H2 | STO-3G | 4 | `I_M`, `I_r`, `I_QPE` |
+| LiH | STO-3G | 12 | `I_M`, `I_r`, `I_QPE` |
+| BeH2 | STO-3G | 14 | `I_M`, `I_r`, `I_QPE` |
+| H2O | STO-3G | 14 | `I_M`, `I_r`, `I_QPE` |
+| NH3 | STO-3G | 16 | `I_M`, `I_r`, `I_QPE` |
+| CH4 | STO-3G | 18 | `I_M`のみ |
+| N2 | STO-3G | 20 | `I_M`のみ |
+| H2O | cc-pVDZ | 48 | `I_M`のみ |
+| CH4 | cc-pVDZ | 68 | `I_M`のみ |
+| FeMoco | Reiher CAS(54e,54o) | 108 | `I_M`のみ |
+
+ここで`I_M`, `I_r`, `I_QPE`はすべて`Pauli / grouped`です。発展時間は各分子に
+対して`lambda_P t = 1`、分割数は`R=100`です。既定の実誤差サンプル数は
+`K=20`, `S=200`で、`max_group_size`はその系のqubit数です。分子係数は
+Jordan–Wigner変換後に`|a_P| <= 1e-12`を除外します。
+
+H2だけで全経路を確認するpilotは次です。
+
+```bash
+uv run --frozen python molecular_scaling_experiment.py run \
+  --output-dir results/molecular_pilot \
+  --systems h2_sto3g_jw \
+  --number-of-steps 10 \
+  --num-initial-states 2 \
+  --num-trajectories 4 \
+  --num-workers 2 \
+  --trajectory-chunks-per-state 2
+
+uv run --frozen python molecular_scaling_experiment.py aggregate \
+  --output-dir results/molecular_pilot
+```
+
+PBSクラスタで10系すべてを実行する例です。`FEMOCO_FCIDUMP`にはReiherの
+`NORB=54`, `NELEC=54` FCIDUMPを指定します。
+
+```bash
+cd /path/to/my-project
+
+FEMOCO_FCIDUMP=/absolute/path/to/nitrogenase-54e-54o.fcidump \
+NUM_NODES=4 \
+NCPUS=96 \
+MEMORY=350gb \
+WALLTIME=100:00:00 \
+NUM_WORKERS=96 \
+NUMBER_OF_STEPS=100 \
+NUM_INITIAL_STATES=20 \
+NUM_TRAJECTORIES=200 \
+./pbs/submit_molecular_scaling.sh
+```
+
+`NUM_NODES`は1–10で変更できます。10系をarray workerへ静的に分割し、各系の
+JSONが完成した時点でチェックポイント保存します。同じ`RESULT_DIR`で再投入すると
+完成済みの系を検証してskipします。全subjob終了後に集約します。
+
+```bash
+uv run --frozen python molecular_scaling_experiment.py aggregate \
+  --output-dir /absolute/path/to/result
+```
+
+生成物は`molecular_results.csv`、`molecular_improvement_factors.png`、
+`molecular_improvement_factors.pdf`です。FeMoco変換はpacked FCIDUMP積分から
+直接Pauli係数を生成し、巨大な108-spin-orbital四階テンソルを作りません。

@@ -585,12 +585,23 @@ def _plot_summary(
     import matplotlib
 
     matplotlib.use("Agg")
+    matplotlib.rcParams.update(
+        {
+            "font.family": "STIXGeneral",
+            "mathtext.fontset": "stix",
+            "axes.labelsize": 22,
+            "xtick.labelsize": 18,
+            "ytick.labelsize": 18,
+        }
+    )
     import matplotlib.pyplot as plt
 
     labels = {
-        "tau_m_factor": r"$\tau(M_p)$",
-        "infidelity_factor": "average infidelity",
-        "qpe_signal_error_factor": "average QPE signal error",
+        "tau_m_factor": r"$I_M$: Error upper bound",
+        "infidelity_factor": r"$I_r$: Average infidelity",
+        "qpe_signal_error_factor": (
+            r"$I_{\mathrm{QPE}}$: Average QPE signal error"
+        ),
     }
     colors = {
         "tau_m_factor": "#1f77b4",
@@ -604,7 +615,6 @@ def _plot_summary(
             for row in rows
             if row["metric"] == metric
             and int(row["finite_count"]) > 0
-            and float(row["median"]) > 0.0
         ]
         if not selected:
             continue
@@ -613,33 +623,20 @@ def _plot_summary(
             dtype=np.int64,
         )
         median = np.asarray([float(row["median"]) for row in selected])
-        q10 = np.asarray([float(row["q10"]) for row in selected])
-        q90 = np.asarray([float(row["q90"]) for row in selected])
         axis.plot(
             qubits,
             median,
-            marker="o",
-            markersize=3.5,
             linewidth=1.7,
             color=colors[metric],
-            label=f"{labels[metric]} median",
-        )
-        axis.fill_between(
-            qubits,
-            q10,
-            q90,
-            color=colors[metric],
-            alpha=0.16,
-            linewidth=0.0,
-            label=f"{labels[metric]} 10–90%",
+            label=labels[metric],
         )
     axis.axhline(1.0, color="black", linestyle="--", linewidth=1.0)
-    axis.set_yscale("log")
+    axis.set_xscale("linear")
+    axis.set_yscale("linear")
     axis.set_xlabel("Number of qubits")
-    axis.set_ylabel("Improvement factor (Pauli / grouped)")
-    axis.set_title("SYK qDRIFT improvement over disorder realizations")
-    axis.grid(True, which="both", alpha=0.25)
-    axis.legend(fontsize=8, ncol=2)
+    axis.set_ylabel("Improvement factor")
+    axis.grid(True, which="major", alpha=0.25)
+    axis.legend(loc="upper left", fontsize=18, frameon=False)
     figure.savefig(png_path, dpi=200)
     figure.savefig(pdf_path)
     plt.close(figure)

@@ -280,6 +280,36 @@ def _benzene_geometry(
     return carbons + hydrogens
 
 
+LIH_STO3G_FULL_JW = MolecularHamiltonianPreset(
+    name="lih_sto3g_full_jw",
+    description=(
+        "LiH, bond length 1.45 angstrom, full STO-3G orbital space, "
+        "Jordan-Wigner, 12 qubits"
+    ),
+    geometry=(
+        ("Li", (0.0, 0.0, 0.0)),
+        ("H", (0.0, 0.0, 1.45)),
+    ),
+)
+
+BEH2_STO3G_FULL_JW = MolecularHamiltonianPreset(
+    name="beh2_sto3g_full_jw",
+    description=(
+        "BeH2, linear geometry with Be-H distance 1.3264 angstrom, full "
+        "STO-3G orbital space, Jordan-Wigner, 14 qubits"
+    ),
+    geometry=_linear_symmetric_geometry("Be", "H", 1.3264),
+)
+
+H2O_STO3G_FULL_JW = MolecularHamiltonianPreset(
+    name="h2o_sto3g_full_jw",
+    description=(
+        "H2O, O-H distance 0.9576 angstrom, angle 104.5 degrees, full "
+        "STO-3G orbital space, Jordan-Wigner, 14 qubits"
+    ),
+    geometry=_bent_symmetric_geometry("O", "H", 0.9576, 104.5),
+)
+
 NH3_STO3G_FULL_JW = MolecularHamiltonianPreset(
     name="nh3_sto3g_full_jw",
     description=(
@@ -296,6 +326,38 @@ CH4_STO3G_FULL_JW = MolecularHamiltonianPreset(
         "orbital space, Jordan-Wigner, 18 qubits"
     ),
     geometry=_tetrahedral_geometry(1.087),
+)
+
+N2_STO3G_FULL_JW = MolecularHamiltonianPreset(
+    name="n2_sto3g_full_jw",
+    description=(
+        "N2, bond length 1.0977 angstrom, full STO-3G orbital space, "
+        "Jordan-Wigner, 20 qubits"
+    ),
+    geometry=(
+        ("N", (0.0, 0.0, 0.0)),
+        ("N", (0.0, 0.0, 1.0977)),
+    ),
+)
+
+H2O_CCPVDZ_FULL_JW = MolecularHamiltonianPreset(
+    name="h2o_ccpvdz_full_jw",
+    description=(
+        "H2O, O-H distance 0.9576 angstrom, angle 104.5 degrees, full "
+        "cc-pVDZ orbital space, Jordan-Wigner, 48 qubits"
+    ),
+    geometry=_bent_symmetric_geometry("O", "H", 0.9576, 104.5),
+    basis="cc-pvdz",
+)
+
+CH4_CCPVDZ_FULL_JW = MolecularHamiltonianPreset(
+    name="ch4_ccpvdz_full_jw",
+    description=(
+        "CH4, tetrahedral C-H distance 1.087 angstrom, full cc-pVDZ "
+        "orbital space, Jordan-Wigner, 68 qubits"
+    ),
+    geometry=_tetrahedral_geometry(1.087),
+    basis="cc-pvdz",
 )
 
 CO_STO3G_FULL_JW = MolecularHamiltonianPreset(
@@ -357,8 +419,14 @@ MOLECULAR_HAMILTONIANS: dict[str, MolecularHamiltonianPreset] = {
     H2_STO3G_JW.name: H2_STO3G_JW,
     LIH_STO3G_ACTIVE_JW.name: LIH_STO3G_ACTIVE_JW,
     H2O_STO3G_CAS_4E_4O_JW.name: H2O_STO3G_CAS_4E_4O_JW,
+    LIH_STO3G_FULL_JW.name: LIH_STO3G_FULL_JW,
+    BEH2_STO3G_FULL_JW.name: BEH2_STO3G_FULL_JW,
+    H2O_STO3G_FULL_JW.name: H2O_STO3G_FULL_JW,
     NH3_STO3G_FULL_JW.name: NH3_STO3G_FULL_JW,
     CH4_STO3G_FULL_JW.name: CH4_STO3G_FULL_JW,
+    N2_STO3G_FULL_JW.name: N2_STO3G_FULL_JW,
+    H2O_CCPVDZ_FULL_JW.name: H2O_CCPVDZ_FULL_JW,
+    CH4_CCPVDZ_FULL_JW.name: CH4_CCPVDZ_FULL_JW,
     CO_STO3G_FULL_JW.name: CO_STO3G_FULL_JW,
     H2S_STO3G_FULL_JW.name: H2S_STO3G_FULL_JW,
     C2H2_STO3G_FULL_JW.name: C2H2_STO3G_FULL_JW,
