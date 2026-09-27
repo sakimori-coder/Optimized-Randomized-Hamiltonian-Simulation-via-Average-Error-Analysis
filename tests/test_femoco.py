@@ -1,88 +1,45 @@
-from pathlib import Path
-
 import numpy as np
 import pytest
-from openfermion.chem.molecular_data import spinorb_from_spatial
-from openfermion.ops import InteractionOperator
-from openfermion.transforms import jordan_wigner
-from pyscf import ao2mo
-from pyscf.tools import fcidump
 
-from hamiltonians.femoco import (
-    ReiherFeMocoHamiltonianPreset,
-    _packed_integrals_to_pauli_terms,
-)
+from hamiltonians import chemistry
+from operators import LCP
 
 
-_SMALL_FCIDUMP = """\
-&FCI NORB=2,NELEC=2,MS2=0,
- ORBSYM=1,1,
- ISYM=1,
-&END
- 0.700000000000 1 1 1 1
- 0.100000000000 2 1 1 1
- 0.300000000000 2 1 2 1
- 0.400000000000 2 2 1 1
--0.050000000000 2 2 2 1
- 0.600000000000 2 2 2 2
--1.000000000000 1 1 0 0
- 0.200000000000 2 1 0 0
--0.400000000000 2 2 0 0
- 0.125000000000 0 0 0 0
-"""
-
-
-def _write_small_fcidump(path: Path) -> None:
-    path.write_text(_SMALL_FCIDUMP, encoding="utf-8")
-
-
-def _openfermion_reference(path: Path) -> dict[str, float]:
-    data = fcidump.read(str(path), verbose=False)
-    num_orbitals = int(data["NORB"])
-    spatial_two_body = ao2mo.restore(1, data["H2"], num_orbitals)
-    one_body, two_body = spinorb_from_spatial(
-        data["H1"],
-        spatial_two_body.transpose(0, 2, 3, 1),
-    )
-    qubit_operator = jordan_wigner(
-        InteractionOperator(data["ECORE"], one_body, 0.5 * two_body)
-    )
-    reference: dict[str, float] = {}
-    for indexed_paulis, coefficient in qubit_operator.terms.items():
-        symbols = ["I"] * (2 * num_orbitals)
-        for index, symbol in indexed_paulis:
-            symbols[2 * num_orbitals - index - 1] = symbol
-        reference["".join(symbols)] = float(complex(coefficient).real)
-    return reference
-
-
-def test_direct_fcidump_jordan_wigner_matches_openfermion(
-    tmp_path: Path,
-) -> None:
+def test_femoco_reads_supplied_active_space_integrals(tmp_path, monkeypatch):
     path = tmp_path / "FCIDUMP"
-    _write_small_fcidump(path)
-    data = fcidump.read(str(path), verbose=False)
-    direct = {
-        pauli: coefficient
-        for coefficient, pauli in _packed_integrals_to_pauli_terms(
-            np.asarray(data["H1"], dtype=float),
-            np.asarray(data["H2"], dtype=float),
-            float(data["ECORE"]),
-            1e-14,
-        )
-    }
+    path.write_text(
+        "&FCI NORB=54,NELEC=54,MS2=0,\n&END\n"
+        " 1.0 1 1 0 0\n 5.0 0 0 0 0\n",
+        encoding="utf-8",
+    )
+    target = LCP({"I" * 107 + "Z": -0.5, "I" * 106 + "ZI": -0.5})
 
-    assert direct == pytest.approx(_openfermion_reference(path), abs=1e-12)
+    # Read and restore the bundled spatial integrals without running a full JW conversion.
+    def convert(one_body, two_body, *, coefficient_tolerance):
+        assert one_body.shape == (54, 54)
+        assert one_body[0, 0] == 1.0 and np.count_nonzero(one_body) == 1
+        assert two_body.shape == (54, 54, 54, 54)
+        assert not np.any(two_body)
+        assert coefficient_tolerance == 3e-12
+        return target
+
+    monkeypatch.setattr(chemistry, "FCIDUMP_PATH", path)
+    monkeypatch.setattr(chemistry.jordan_wigner, "from_spatial_integrals", convert)
+    monkeypatch.chdir(tmp_path)
+    assert chemistry.generate(chemistry.FEMOCO_NAME, coefficient_tolerance=3e-12) is target
 
 
-def test_reiher_femoco_preset_validates_active_space(tmp_path: Path) -> None:
+@pytest.mark.parametrize("header", ["NORB=2,NELEC=54", "NORB=54,NELEC=2"])
+def test_femoco_requires_the_paper_active_space(tmp_path, monkeypatch, header):
     path = tmp_path / "not_femoco.FCIDUMP"
-    _write_small_fcidump(path)
+    path.write_text(f"&FCI {header},MS2=0,\n&END\n 0.0 0 0 0 0\n", encoding="utf-8")
 
-    with pytest.raises(ValueError, match="NORB=54"):
-        ReiherFeMocoHamiltonianPreset(path).generate()
+    monkeypatch.setattr(chemistry, "FCIDUMP_PATH", path)
+    with pytest.raises(ValueError, match="NORB=54.*NELEC=54"):
+        chemistry.generate(chemistry.FEMOCO_NAME)
 
 
-def test_reiher_femoco_missing_path_is_clear(tmp_path: Path) -> None:
-    with pytest.raises(FileNotFoundError, match="FCIDUMP was not found"):
-        ReiherFeMocoHamiltonianPreset(tmp_path / "missing").generate()
+def test_femoco_missing_file_raises_file_not_found(tmp_path, monkeypatch):
+    monkeypatch.setattr(chemistry, "FCIDUMP_PATH", tmp_path / "missing")
+    with pytest.raises(FileNotFoundError):
+        chemistry.generate(chemistry.FEMOCO_NAME)

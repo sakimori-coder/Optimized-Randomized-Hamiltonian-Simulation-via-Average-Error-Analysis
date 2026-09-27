@@ -1,350 +1,150 @@
-# qDRIFT metric comparison
+# qDRIFTの改善率の数値計算
 
-このプロジェクトは、SYK模型または分子Hamiltonianについて次の2方式を比較する
-ためだけのコードです。
+化学HamiltonianとSYK模型について、単項Pauli qDRIFTと、可換グループを
+HSノルム重みでサンプルするqDRIFTの改善率 `I_M`・`I_r`・`I_sig` を計算します。
+数式と実装の対応は [NUMERICS.md](NUMERICS.md) にまとめています。
 
-- 単項Pauli qDRIFT
-- `chemistry_depth1`グループ化＋Frobenius重み付きqDRIFT
+## 実行
 
-グループ`g`の重みとサンプリング確率は
-
-```text
-h_g = sqrt(sum_(P in g) a_P^2)
-p_g = h_g / sum_g h_g
-```
-
-です。出力する3指標は
-
-```text
-tau(M_p) ratio              = tau(M_p)_pauli / tau(M_p)_grouped
-average infidelity ratio    = infidelity_pauli / infidelity_grouped
-average QPE signal ratio    = QPE_error_pauli / QPE_error_grouped
-```
-
-で、比が1より大きいほどグループ化による改善が大きいことを表します。
-
-## 分子Hamiltonian
-
-```bash
-uv run python qdrift_metric_comparison.py \
-  --hamiltonian h2o_sto3g_cas_4e_4o_jw \
-  --time 0.3 \
-  --number-of-steps 20 \
-  --num-initial-states 50 \
-  --num-trajectories 500 \
-  --max-group-size 8 \
-  --num-workers 8 \
-  --trajectory-chunks-per-state 8 \
-  --seed 42
-```
-
-利用可能な分子名は次で確認できます。
-
-```bash
-uv run python qdrift_metric_comparison.py --help
-```
-
-## SYK模型
-
-```bash
-uv run python qdrift_metric_comparison.py \
-  --syk-qubits 10 \
-  --syk-coupling-scale 1.0 \
-  --syk-seed 42 \
-  --time 0.3 \
-  --number-of-steps 20 \
-  --num-initial-states 20 \
-  --num-trajectories 200 \
-  --max-group-size 10 \
-  --num-workers 8 \
-  --seed 42
-```
-
-## 指標
-
-`H = sum_j K_j`、`p_j`をqDRIFT確率、`B_j = K_j/p_j`として
-
-```text
-M_p = sum_j p_j (B_j - H)^2
-```
-
-です。`tau(M_p)`はPauli係数走査により`O(L)`で厳密に計算します。
-
-入力`|psi>`、理想状態`|phi> = exp(-itH)|psi>`、ランダムqDRIFT軌道状態
-`|chi_s>`に対して、状態と軌道をサンプルして
-
-```text
-average infidelity
-  = E_psi [1 - E_s |<phi|chi_s>|^2]
-
-average QPE signal error
-  = E_psi |<psi|phi> - E_s <psi|chi_s>|
-```
-
-を計算します。QPE信号は複素軌道平均を取った後に絶対値を取ります。
-
-## 並列化
-
-Qulacs、OpenMP、BLASはworkerごとに1スレッドへ固定しています。Haar入力状態と
-理想発展をプロセス並列化し、その後、各入力状態のqDRIFT軌道をチャンク分割して
-プロセス並列化します。標準worker数は8です。逐次実行は
-`--num-workers 1`で選択できます。
-
-状態ベクトル計算量は概ね`O(K S R m_bar 2^n)`なので、小規模Hamiltonian向け
-です。`tau(M_p)`だけは大規模系でも計算できますが、このCLIは指定された3指標を
-常にまとめて計算します。
-
-## PBSクラスタ（OpenPBS 20）
-
-`pbs/submit.sh`はHaar入力状態`K`個をPBS Job Arrayへ分割します。1つのarray
-subjobが1ノードを使い、そのノード内で入力状態とqDRIFT軌道をプロセス並列化
-します。QPE信号については、1つの入力状態に属する全軌道を必ず同じshardで
-処理してから絶対値を取ります。
-
-96コア、約370 GBのノードを4ノード使う例は次です。既定メモリ要求はOS等の
-余裕を残した350 GBです。
-
-```bash
-cd /path/to/my-project
-
-NUM_NODES=4 \
-NCPUS=96 \
-MEMORY=350gb \
-WALLTIME=12:00:00 \
-HAMILTONIAN=h2o_sto3g_cas_4e_4o_jw \
-TOTAL_TIME=0.3 \
-NUMBER_OF_STEPS=20 \
-NUM_INITIAL_STATES=200 \
-NUM_TRAJECTORIES=500 \
-MAX_GROUP_SIZE=8 \
-SEED=42 \
-./pbs/submit.sh
-```
-
-- `NUM_NODES`: 入力状態の総分割数かつarray subjob数（1 subjob = 1ノード）
-- `NUM_WORKERS`: 各ノード内のプロセス数（既定は`NCPUS`と同じ96）
-- `TRAJECTORY_CHUNKS_PER_STATE`: 1入力状態・1方式あたりの軌道チャンク数
-
-利用可能ノード数が変わった場合は、たとえば
-`NUM_NODES=2 ./pbs/submit.sh`または`NUM_NODES=8 ./pbs/submit.sh`のように提出時の
-値だけ変更します。同じ`SEED`と`TRAJECTORY_CHUNKS_PER_STATE`なら、ノード数を
-変更してもグローバル入力状態番号から同じ乱数を生成します。
-
-OpenPBS 20.0.xには、新しい版の`-J 1-N%同時実行上限`がありません。そのため、
-このPBS 20用スクリプトでは`NUM_NODES`とshard数を同じにしています。各subjobは
-独立なので、PBSが4ノードを同時に確保できない場合でも、空いたノードから順に
-実行されます。
-
-SYK模型は次のように提出します。
-
-```bash
-SOURCE_KIND=syk \
-SYK_QUBITS=12 \
-SYK_COUPLING_SCALE=1.0 \
-SYK_SEED=42 \
-NUM_NODES=4 \
-./pbs/submit.sh
-```
-
-クラスタ固有の`module load`等が必要なら、その処理を書いたファイルを
-`PBS_ENV_SCRIPT=/absolute/path/to/setup.sh`で指定します。queueとaccountも
-`PBS_QUEUE`、`PBS_ACCOUNT`で指定できます。
-
-提出後に表示されるjob IDは`qstat -t JOB_ID`で確認します。すべてのsubjobが
-正常終了した後、結果を検証して統合します。
-
-```bash
-uv run --frozen python qdrift_metric_comparison.py \
-  --merge-partials /absolute/path/to/result-directory
-```
-
-統合処理は、全shardと全グローバル入力状態番号が重複なく揃っていること、実験
-条件と`tau(M_p)`が全ノードで一致することを検証してから、3つの
-Pauli/grouped比と全入力状態に対する標準誤差を出力します。
-
-この並列化は独立な状態・軌道サンプルをノードへ分配するもので、1本の状態ベクトル
-を複数ノードへ分散する実装ではありません。概算の主要メモリ下限は、1ノードの
-入力状態数を`K_local`、worker数を`W`として
-`16 * 2^n * (2 K_local + W)` byte程度です。大きな`n`では
-`NUM_NODES`を増やして`K_local`を減らし、必要なら`NUM_WORKERS`も減らして
-ください。72 qubit級の状態ベクトル計算は、この方式では実行できません。
-
-## SYK 5–50 qubit・50 disorder realization sweep
-
-`syk_scaling_experiment.py`は、各qubit数について独立なSYK Hamiltonianを50個
-生成し、改善率をHamiltonianごとに
-
-```text
-factor = Pauli qDRIFTの値 / grouped qDRIFTの値
-```
-
-として計算します。既定の実験範囲は次のとおりです。
-
-- 5–15 qubit: `tau(M_p)`、平均infidelity、平均QPE信号誤差
-- 16–50 qubit: `tau(M_p)`のみ（状態ベクトルやqDRIFT軌道は生成しない）
-- 各qubit数: 50 disorder realization
-- `max_group_size`: 各qubit数と同じ値
-- 発展時間: realizationごとに単項Pauli分解の
-  `lambda_P = sum_P |a_P|`を計算し、`t = 1/lambda_P`
-- qDRIFT分割数: `R = 100`
-
-Pauli qDRIFTとgrouped qDRIFTは、比較のため同じ物理発展時間`t`を使います。
-したがって`lambda_P t = 1`であり、grouped側は通常
-`lambda_grouped t < 1`です。
-
-ローカルで小さなpilot実験を行う例です。
-
-```bash
-uv run --frozen python syk_scaling_experiment.py run \
-  --output-dir results/syk_pilot \
-  --min-qubits 5 \
-  --max-qubits 8 \
-  --num-realizations 3 \
-  --statevector-max-qubits 8 \
-  --number-of-steps 100 \
-  --num-initial-states 20 \
-  --num-trajectories 200 \
-  --num-workers 8 \
-  --trajectory-chunks-per-state 8
-
-uv run --frozen python syk_scaling_experiment.py aggregate \
-  --output-dir results/syk_pilot
-```
-
-PBSクラスタで要求された全範囲を実行する場合は次です。
+Python 3.10.11以上とLinuxを使います。依存パッケージをインストールします。
 
 ```bash
 uv sync --frozen
-
-NUM_NODES=8 \
-NCPUS=96 \
-MEMORY=350gb \
-NUM_WORKERS=96 \
-TAU_WORKERS=8 \
-WALLTIME=48:00:00 \
-NUMBER_OF_STEPS=100 \
-NUM_INITIAL_STATES=20 \
-NUM_TRAJECTORIES=200 \
-./pbs/submit_syk_scaling.sh
 ```
 
-`NUM_NODES`個のPBS array workerへ全2,300 realizationタスクを均等に分けます。
-15 qubit以下では`NUM_WORKERS`を1 realization内の状態・軌道並列化に使い、
-16 qubit以上では`TAU_WORKERS`個のdisorder realizationをノード内で並列化します。
-50 qubitでは1 Hamiltonianが`C(100,4) = 3,921,225` Pauli項を持つため、最初は
-`TAU_WORKERS=4`または`8`を推奨します。
-
-各realizationは次のように個別保存されます。
-
-```text
-RESULT_DIR/
-  configuration.json
-  realizations/q005_r000.json
-  realizations/q005_r001.json
-  ...
-```
-
-walltimeで終了した場合、最初の提出時に表示された同じ`RESULT_DIR`を指定して
-再投入できます。完成済みJSONは設定とseedを検証してskipします。ノード数は再投入
-時に変更できます。
+化学系は分子IDを指定して実行します。引数を省略すると下表の全10系を順に処理します。
 
 ```bash
-RESULT_DIR=/absolute/path/to/previous/result \
-NUM_NODES=4 \
-./pbs/submit_syk_scaling.sh
+uv run --frozen python chemistry_improvement_factors.py h2_sto3g_jw lih_sto3g_full_jw
 ```
 
-全array jobの終了後に集約します。
+| 分子ID | 量子ビット数 | 基底・軌道 |
+|---|---:|---|
+| `h2_sto3g_jw` | 4 | STO-3G |
+| `lih_sto3g_full_jw` | 12 | STO-3G |
+| `beh2_sto3g_full_jw` | 14 | STO-3G |
+| `h2o_sto3g_full_jw` | 14 | STO-3G |
+| `nh3_sto3g_full_jw` | 16 | STO-3G |
+| `ch4_sto3g_full_jw` | 18 | STO-3G |
+| `n2_sto3g_full_jw` | 20 | STO-3G |
+| `h2o_ccpvdz_full_jw` | 48 | cc-pVDZ |
+| `ch4_ccpvdz_full_jw` | 68 | cc-pVDZ |
+| `femoco_reiher_54e_54o_jw` | 108 | CAS(54e,54o)の供給積分 |
+
+`I_M` は全系、`I_r` と `I_sig` は16量子ビット以下で計算します。
+FeMocoの入力は同梱の `hamiltonians/nitrogenase-54e-54o.fcidump` です。
+
+SYK模型は量子ビット数を指定します。各サイズで50インスタンスを生成し、
+「量子ビット数 × realization」を1つの仕事として並列計算します。
+引数を省略すると5〜50量子ビットを処理します。
 
 ```bash
-uv run --frozen python syk_scaling_experiment.py aggregate \
-  --output-dir /absolute/path/to/result
+uv run --frozen python syk_improvement_factors.py 5 10 15
 ```
 
-生成物は以下です。
+`I_M` は全サイズ、`I_r` と `I_sig` は15量子ビット以下で計算します。
+結合スケールは `J=1`、結合定数の分散は `3! J² / (2n)³` です。
 
-- `syk_realizations.csv`: 全realizationのPauli値、grouped値、改善率、MC標準誤差
-- `syk_summary.csv`: qubit数・指標ごとの平均、標準誤差、中央値、四分位、10–90%点
-- `syk_improvement_factors.png` / `.pdf`: 改善率の中央値を結んだ線形軸グラフ
+## 計算条件と結果
 
-グラフの縦軸は`Pauli / grouped`の線形軸で、1より大きいほどグループ化による改善が
-大きいことを表します。既定では各realizationで`lambda_P t=1`、
-`R=100`、`K=20`、`S=200`です。最終的な数値実験では、先にpilotでMC標準誤差を
-確認してから`K`と`S`を増やしてください。分母が0になった非有限factorはraw CSV
-には残しますが、集約統計とグラフからは除外し、`finite_count`列で使用された
-realization数を確認できます。
+実行条件は各スクリプト冒頭の定数で設定します。
+両スクリプトの既定値は100ステップ、100初期状態、各方式・各初期状態1000軌跡です。
+発展時間はインスタンスごとに `t = 1 / sum_P |a_P|` とします。
 
-実装確認時の参考値として、50 qubit・1 realizationの`tau(M_p)`計算は約119秒、
-最大RSS約2.2 GBでした（実行環境に依存します）。15 qubitの状態ベクトル側は最小
-条件`K=1, S=2, R=1`でも約54秒だったため、全条件を投入する前に5–15 qubitの
-pilotでwalltimeを測ることを推奨します。
+化学系は分子を順に処理し、各初期状態の軌跡を同じノード内で並列計算します。
+化学系の `NUM_WORKERS` は `len(os.sched_getaffinity(0))` で取得した利用可能な論理CPU数です。
 
-## 分子ベンチマーク sweep
+SYKは指定した全量子ビット数とrealizationの組を、1つのプロセスプールへ投入します。
+既定では46サイズ × 50 realization = 2300個の仕事です。
+空いたworkerが次の組を処理するため、量子ビット数ごとの待ち合わせはありません。
+各workerがHamiltonian生成・グループ化・改善率計算までを担当し、
+仕事の内部では `estimate_i_r_and_i_sig(..., num_workers=1)` で逐次計算します。
 
-`molecular_scaling_experiment.py`は次の固定系列を比較します。すべてfull orbital
-spaceでJordan–Wigner変換します。
+SYKの `NUM_WORKERS` は同時に処理する仕事数で、化学系と同じく
+`len(os.sched_getaffinity(0))` で取得した利用可能な論理CPU数を使います。
 
-| 系 | 基底/active space | qubit | 計算する改善率 |
-|---|---|---:|---|
-| H2 | STO-3G | 4 | `I_M`, `I_r`, `I_QPE` |
-| LiH | STO-3G | 12 | `I_M`, `I_r`, `I_QPE` |
-| BeH2 | STO-3G | 14 | `I_M`, `I_r`, `I_QPE` |
-| H2O | STO-3G | 14 | `I_M`, `I_r`, `I_QPE` |
-| NH3 | STO-3G | 16 | `I_M`, `I_r`, `I_QPE` |
-| CH4 | STO-3G | 18 | `I_M`のみ |
-| N2 | STO-3G | 20 | `I_M`のみ |
-| H2O | cc-pVDZ | 48 | `I_M`のみ |
-| CH4 | cc-pVDZ | 68 | `I_M`のみ |
-| FeMoco | Reiher CAS(54e,54o) | 108 | `I_M`のみ |
+両スクリプトとも起動時に `QULACS_NUM_THREADS=1` を設定し、各workerのQulacsを1スレッドで実行します。
 
-ここで`I_M`, `I_r`, `I_QPE`はすべて`Pauli / grouped`です。発展時間は各分子に
-対して`lambda_P t = 1`、分割数は`R=100`です。既定の実誤差サンプル数は
-`K=20`, `S=200`で、`max_group_size`はその系のqubit数です。分子係数は
-Jordan–Wigner変換後に`|a_P| <= 1e-12`を除外します。
+結果と計算条件を次のCSVに1インスタンスずつ保存します。実行ごとに上書きします。
 
-H2だけで全経路を確認するpilotは次です。
+- `results/chemistry_improvement_factors.csv`
+- `results/syk_improvement_factors.csv`
+
+SYKのCSVは親プロセスが指定した量子ビット数の順、realization番号順に書き込みます。
+状態ベクトルを計算しないサイズでは、`I_r` と `I_sig` は空欄です。
+改善率はすべて単項版の値をグループ版の値で割った比で、1より大きいと改善を表します。
+SYKの曲線をまとめる場合は、各量子ビット数についてインスタンスごとの改善率の中央値を取ります。
+
+化学系のseedは42です。SYKでは基準seed 42から結合定数用とサンプリング用の
+別々のseedを作り、両方をCSVに記録します。
+SYKではseedとサンプル数を固定すると、仕事の並列数や量子ビット数の指定順を変えても
+同じ乱数標本で計算します。化学系は軌跡worker数も固定します。
+
+## Pythonから利用する
+
+Hamiltonian生成は `LCP`、グループ化は `LCH` を返します。
+`LCP` はPauli係数の辞書、`LCH` は `H = sum_j H_j` の各 `H_j` を保持します。
+
+```python
+import os
+os.environ["QULACS_NUM_THREADS"] = "1"
+
+from hamiltonians import chemistry, syk
+from grouping import build_fermionic_lch
+from improvement_factors import calculate_i_m, estimate_i_r_and_i_sig
+
+H = chemistry.generate("h2_sto3g_jw")
+# SYKの場合: H = syk.generate(num_qubits=5, seed=42)
+H_grouped = build_fermionic_lch(H)
+t = 1 / sum(abs(a) for a in H.terms.values())
+
+I_M = calculate_i_m(H, H_grouped)
+I_r, I_sig = estimate_i_r_and_i_sig(
+    H, H_grouped, total_time=t, number_of_steps=100,
+    num_initial_states=20, num_trajectories=200, seed=42, num_workers=8,
+)
+```
+
+`calculate_i_m` は係数だけから計算します。
+`estimate_i_r_and_i_sig` は各Haar初期状態の理想発展を1回計算し、
+同じ入力・理想状態を使って単項版とグループ版のqDRIFT軌跡をサンプルします。
+`num_workers=1` なら逐次実行です。
+
+個別の状態発展も、Qulacsの `QuantumState` を渡して計算できます。
+両関数とも入力をコピーして使い、発展後の新しい状態を返します。
+
+```python
+from qulacs import QuantumState
+from ideal_time_evolution import ideal_time_evolved_state
+from qdrift_trajectory import sample_qdrift_state
+
+initial = QuantumState(H.num_qubits)
+initial.set_Haar_random_state(42)
+ideal = ideal_time_evolved_state(H, time=t, initial_state=initial)
+sampled = sample_qdrift_state(H_grouped, t, 100, initial, rng=42)
+```
+
+## ファイル構成
+
+| ファイル | 役割 |
+|---|---|
+| [chemistry_improvement_factors.py](chemistry_improvement_factors.py) | 化学系の実験とCSV出力 |
+| [syk_improvement_factors.py](syk_improvement_factors.py) | SYK模型の実験とCSV出力 |
+| [improvement_factors.py](improvement_factors.py) | `I_M`・`I_r`・`I_sig` の計算 |
+| [grouping.py](grouping.py) | フェルミオン系の可換グループ分割 |
+| [qdrift_trajectory.py](qdrift_trajectory.py) | qDRIFT軌跡のサンプルと状態発展 |
+| [ideal_time_evolution.py](ideal_time_evolution.py) | 理想時間発展 |
+| `hamiltonians/` | 化学系・SYKの生成と共通Jordan–Wigner変換 |
+| `operators/` | `LCP`・`LCH` と正規化HSノルム |
+| `tests/` | 密行列計算などによる数値検証 |
+
+## 検証
 
 ```bash
-uv run --frozen python molecular_scaling_experiment.py run \
-  --output-dir results/molecular_pilot \
-  --systems h2_sto3g_jw \
-  --number-of-steps 10 \
-  --num-initial-states 2 \
-  --num-trajectories 4 \
-  --num-workers 2 \
-  --trajectory-chunks-per-state 2
-
-uv run --frozen python molecular_scaling_experiment.py aggregate \
-  --output-dir results/molecular_pilot
+OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 QULACS_NUM_THREADS=1 \
+  uv run --frozen --extra test python -m pytest -q
 ```
 
-PBSクラスタで10系すべてを実行する例です。`FEMOCO_FCIDUMP`にはReiherの
-`NORB=54`, `NELEC=54` FCIDUMPを指定します。
-
-```bash
-cd /path/to/my-project
-
-FEMOCO_FCIDUMP=/absolute/path/to/nitrogenase-54e-54o.fcidump \
-NUM_NODES=4 \
-NCPUS=96 \
-MEMORY=350gb \
-WALLTIME=100:00:00 \
-NUM_WORKERS=96 \
-NUMBER_OF_STEPS=100 \
-NUM_INITIAL_STATES=20 \
-NUM_TRAJECTORIES=200 \
-./pbs/submit_molecular_scaling.sh
-```
-
-`NUM_NODES`は1–10で変更できます。10系をarray workerへ静的に分割し、各系の
-JSONが完成した時点でチェックポイント保存します。同じ`RESULT_DIR`で再投入すると
-完成済みの系を検証してskipします。全subjob終了後に集約します。
-
-```bash
-uv run --frozen python molecular_scaling_experiment.py aggregate \
-  --output-dir /absolute/path/to/result
-```
-
-生成物は`molecular_results.csv`、`molecular_improvement_factors.png`、
-`molecular_improvement_factors.pdf`です。FeMoco変換はpacked FCIDUMP積分から
-直接Pauli係数を生成し、巨大な108-spin-orbital四階テンソルを作りません。
+小規模系でJordan–Wigner変換、グループの保存性・可換性・独立性、
+理想時間発展、qDRIFT軌跡、3つの改善率を検証します。
+OpenFermionは化学Hamiltonianの照合テストで使います。

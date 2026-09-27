@@ -1,521 +1,95 @@
-r"""Generate molecular Hamiltonians with PySCF and OpenFermion.
+"""Identity-free Jordan--Wigner Hamiltonians for the paper's molecular systems.
 
-PySCF computes molecular integrals from a geometry, OpenFermion applies the
-Jordan--Wigner transformation, and the resulting Pauli terms are converted to
-the project's :class:`operators.LCP` representation.
-
-The identity term is excluded from generated LCP objects by default because it
-contributes only a global phase.
+The nine geometry/basis settings use neutral singlets and all basis orbitals.
+Coordinates are in angstrom and energies in Hartree. FeMoco uses the bundled
+Reiher CAS(54e,54o) active-space integrals.
 """
 
-from __future__ import annotations
-
 import math
-from collections.abc import Sequence
-from dataclasses import dataclass
-from functools import lru_cache
-from numbers import Real
 from pathlib import Path
-from tempfile import TemporaryDirectory
-from typing import TypeAlias
 
-import numpy as np
+from . import jordan_wigner
 
-from operators import LCP
-
-
-Atom: TypeAlias = tuple[str, tuple[float, float, float]]
-Geometry: TypeAlias = tuple[Atom, ...]
+FEMOCO_NAME = "femoco_reiher_54e_54o_jw"
+FCIDUMP_PATH = Path(__file__).with_name("nitrogenase-54e-54o.fcidump")
 
 
-# OpenFermion's own ``SymbolicOperator.compress`` uses 1e-8 as its default
-# roundoff tolerance.  Keep that tolerance only for the forbidden imaginary
-# part: real coefficients continue to use the user-selected coefficient
-# cutoff, which is 1e-12 by default.
-_HERMITICITY_ROUNDOFF_TOLERANCE = 1e-8
-
-
-def _normalized_geometry(
-    geometry: Sequence[tuple[str, Sequence[float]]],
-) -> Geometry:
-    normalized: Geometry = tuple(
-        (atom, tuple(float(value) for value in coordinates))
-        for atom, coordinates in geometry
-    )
-    if any(len(coordinates) != 3 for _, coordinates in normalized):
-        raise ValueError("each atom must have three Cartesian coordinates")
-    return normalized
-
-
-def _validated_nonnegative_real(value: float, *, name: str) -> float:
-    if not isinstance(value, Real) or isinstance(value, bool):
-        raise TypeError(f"{name} must be a real number")
-    value = float(value)
-    if not np.isfinite(value) or value < 0.0:
-        raise ValueError(f"{name} must be finite and non-negative")
-    return value
-
-
-@dataclass(frozen=True)
-class GeneratedMolecularHamiltonian:
-    """Immutable result of one PySCF and Jordan--Wigner calculation."""
-
-    num_qubits: int
-    terms: tuple[tuple[float, str], ...]
-    hartree_fock_energy: float
-
-    @property
-    def identity_pauli(self) -> str:
-        return "I" * self.num_qubits
-
-    @property
-    def identity_coefficient(self) -> float:
-        return next(
-            (
-                coefficient
-                for coefficient, pauli in self.terms
-                if pauli == self.identity_pauli
-            ),
-            0.0,
-        )
-
-    def to_lcp(
-        self,
-        *,
-        include_identity: bool = False,
-    ) -> LCP:
-        """Convert generated Pauli terms to a fresh LCP."""
-        return LCP(
-            {
-                pauli: coefficient
-                for coefficient, pauli in self.terms
-                if include_identity or pauli != self.identity_pauli
-            },
-            num_qubits=self.num_qubits,
-        )
-
-
-@dataclass(frozen=True)
-class MolecularHamiltonianPreset:
-    """A named molecular specification from which an LCP is generated."""
-
-    name: str
-    description: str
-    geometry: Geometry
-    basis: str = "sto-3g"
-    multiplicity: int = 1
-    charge: int = 0
-    occupied_indices: tuple[int, ...] | None = None
-    active_indices: tuple[int, ...] | None = None
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "geometry", _normalized_geometry(self.geometry))
-        if self.occupied_indices is not None:
-            object.__setattr__(
-                self,
-                "occupied_indices",
-                tuple(self.occupied_indices),
-            )
-        if self.active_indices is not None:
-            object.__setattr__(self, "active_indices", tuple(self.active_indices))
-
-    def generate(
-        self,
-        *,
-        coefficient_tolerance: float = 1e-12,
-    ) -> GeneratedMolecularHamiltonian:
-        """Run PySCF and return the cached Jordan--Wigner Hamiltonian."""
-        tolerance = _validated_nonnegative_real(
-            coefficient_tolerance,
-            name="coefficient_tolerance",
-        )
-        return _generate_molecular_hamiltonian(
-            self.geometry,
-            self.basis,
-            self.multiplicity,
-            self.charge,
-            self.occupied_indices,
-            self.active_indices,
-            tolerance,
-        )
-
-H2_STO3G_JW = MolecularHamiltonianPreset(
-    name="h2_sto3g_jw",
-    description=(
-        "H2, bond length 0.735 angstrom, STO-3G, Jordan-Wigner, "
-        "four qubits"
-    ),
-    geometry=(
-        ("H", (0.0, 0.0, 0.0)),
-        ("H", (0.0, 0.0, 0.735)),
-    ),
+# H2O: the two O-H bonds make angles +/-104.5/2 degrees with the z axis.
+_water_x = 0.9576 * math.sin(math.radians(104.5 / 2.0))
+_water_z = 0.9576 * math.cos(math.radians(104.5 / 2.0))
+_WATER_GEOMETRY = (
+    ("O", (0.0, 0.0, 0.0)),
+    ("H", (_water_x, 0.0, _water_z)),
+    ("H", (-_water_x, 0.0, _water_z)),
 )
 
-LIH_STO3G_ACTIVE_JW = MolecularHamiltonianPreset(
-    name="lih_sto3g_active_jw",
-    description=(
-        "LiH, bond length 1.45 angstrom, STO-3G, frozen spatial orbital 0, "
-        "active spatial orbitals 1-2, Jordan-Wigner, four qubits"
-    ),
-    geometry=(
-        ("Li", (0.0, 0.0, 0.0)),
-        ("H", (0.0, 0.0, 1.45)),
-    ),
-    occupied_indices=(0,),
-    active_indices=(1, 2),
+# NH3: three N-H bonds separated by 120 degrees around the z axis.
+# cos(H-N-H) = (3 cos(polar_angle)^2 - 1) / 2.
+_nh3_cos2 = (2.0 * math.cos(math.radians(106.7)) + 1.0) / 3.0
+_nh3_radius = 1.012 * math.sqrt(1.0 - _nh3_cos2)
+_nh3_height = 1.012 * math.sqrt(_nh3_cos2)
+_AMMONIA_GEOMETRY = (("N", (0.0, 0.0, 0.0)),) + tuple(
+    ("H", (
+        _nh3_radius * math.cos(2.0 * math.pi * index / 3.0),
+        _nh3_radius * math.sin(2.0 * math.pi * index / 3.0),
+        _nh3_height,
+    ))
+    for index in range(3)
 )
 
-H2O_STO3G_CAS_4E_4O_JW = MolecularHamiltonianPreset(
-    name="h2o_sto3g_cas_4e_4o_jw",
-    description=(
-        "H2O, O-H distance 0.9576 angstrom, angle 104.5 degrees, STO-3G, "
-        "CAS(4e,4o), Jordan-Wigner, eight qubits"
-    ),
-    geometry=(
-        ("O", (0.0, 0.0, 0.0)),
-        ("H", (0.75716, 0.0, 0.58626)),
-        ("H", (-0.75716, 0.0, 0.58626)),
-    ),
-    occupied_indices=(0, 1, 2),
-    active_indices=(3, 4, 5, 6),
+# CH4: tetrahedral vertices at distance 1.087 from the carbon.
+_ch4_coordinate = 1.087 / math.sqrt(3.0)
+_METHANE_GEOMETRY = (("C", (0.0, 0.0, 0.0)),) + tuple(
+    ("H", tuple(sign * _ch4_coordinate for sign in signs))
+    for signs in ((1, 1, 1), (-1, -1, 1), (-1, 1, -1), (1, -1, -1))
 )
 
-
-def _linear_symmetric_geometry(
-    center: str,
-    outer: str,
-    bond_length: float,
-) -> Geometry:
-    """Return ``outer-center-outer`` on the z axis."""
-    return (
-        (outer, (0.0, 0.0, -bond_length)),
-        (center, (0.0, 0.0, 0.0)),
-        (outer, (0.0, 0.0, bond_length)),
-    )
-
-
-def _bent_symmetric_geometry(
-    center: str,
-    outer: str,
-    bond_length: float,
-    angle_degrees: float,
-) -> Geometry:
-    """Return a planar two-bond geometry symmetric about the z axis."""
-    half_angle = math.radians(angle_degrees / 2.0)
-    transverse = bond_length * math.sin(half_angle)
-    longitudinal = bond_length * math.cos(half_angle)
-    return (
-        (center, (0.0, 0.0, 0.0)),
-        (outer, (transverse, 0.0, longitudinal)),
-        (outer, (-transverse, 0.0, longitudinal)),
-    )
-
-
-def _tetrahedral_geometry(bond_length: float) -> Geometry:
-    """Return methane with a carbon at the origin."""
-    coordinate = bond_length / math.sqrt(3.0)
-    return (
-        ("C", (0.0, 0.0, 0.0)),
-        ("H", (coordinate, coordinate, coordinate)),
-        ("H", (-coordinate, -coordinate, coordinate)),
-        ("H", (-coordinate, coordinate, -coordinate)),
-        ("H", (coordinate, -coordinate, -coordinate)),
-    )
-
-
-def _trigonal_pyramidal_geometry(
-    bond_length: float,
-    angle_degrees: float,
-) -> Geometry:
-    """Return a C3v ammonia geometry with nitrogen at the origin."""
-    bond_angle = math.radians(angle_degrees)
-    polar_cosine_squared = (2.0 * math.cos(bond_angle) + 1.0) / 3.0
-    polar_cosine = math.sqrt(polar_cosine_squared)
-    radius = bond_length * math.sqrt(1.0 - polar_cosine_squared)
-    height = bond_length * polar_cosine
-    hydrogens = tuple(
-        (
-            "H",
-            (
-                radius * math.cos(2.0 * math.pi * index / 3.0),
-                radius * math.sin(2.0 * math.pi * index / 3.0),
-                height,
-            ),
-        )
-        for index in range(3)
-    )
-    return (("N", (0.0, 0.0, 0.0)), *hydrogens)
-
-
-def _benzene_geometry(
-    carbon_carbon_distance: float,
-    carbon_hydrogen_distance: float,
-) -> Geometry:
-    """Return a planar D6h benzene geometry centered at the origin."""
-    hydrogen_radius = carbon_carbon_distance + carbon_hydrogen_distance
-    carbons = tuple(
-        (
-            "C",
-            (
-                carbon_carbon_distance
-                * math.cos(math.pi * index / 3.0),
-                carbon_carbon_distance
-                * math.sin(math.pi * index / 3.0),
-                0.0,
-            ),
-        )
-        for index in range(6)
-    )
-    hydrogens = tuple(
-        (
-            "H",
-            (
-                hydrogen_radius * math.cos(math.pi * index / 3.0),
-                hydrogen_radius * math.sin(math.pi * index / 3.0),
-                0.0,
-            ),
-        )
-        for index in range(6)
-    )
-    return carbons + hydrogens
-
-
-LIH_STO3G_FULL_JW = MolecularHamiltonianPreset(
-    name="lih_sto3g_full_jw",
-    description=(
-        "LiH, bond length 1.45 angstrom, full STO-3G orbital space, "
-        "Jordan-Wigner, 12 qubits"
+# Each entry contains (geometry, basis).
+MOLECULAR_HAMILTONIANS = {
+    "h2_sto3g_jw": (
+        (("H", (0.0, 0.0, 0.0)), ("H", (0.0, 0.0, 0.735))), "sto-3g"
     ),
-    geometry=(
-        ("Li", (0.0, 0.0, 0.0)),
-        ("H", (0.0, 0.0, 1.45)),
+    "lih_sto3g_full_jw": (
+        (("Li", (0.0, 0.0, 0.0)), ("H", (0.0, 0.0, 1.45))), "sto-3g"
     ),
-)
-
-BEH2_STO3G_FULL_JW = MolecularHamiltonianPreset(
-    name="beh2_sto3g_full_jw",
-    description=(
-        "BeH2, linear geometry with Be-H distance 1.3264 angstrom, full "
-        "STO-3G orbital space, Jordan-Wigner, 14 qubits"
+    "beh2_sto3g_full_jw": (
+        (("H", (0.0, 0.0, -1.3264)), ("Be", (0.0, 0.0, 0.0)),
+         ("H", (0.0, 0.0, 1.3264))), "sto-3g"
     ),
-    geometry=_linear_symmetric_geometry("Be", "H", 1.3264),
-)
-
-H2O_STO3G_FULL_JW = MolecularHamiltonianPreset(
-    name="h2o_sto3g_full_jw",
-    description=(
-        "H2O, O-H distance 0.9576 angstrom, angle 104.5 degrees, full "
-        "STO-3G orbital space, Jordan-Wigner, 14 qubits"
+    "h2o_sto3g_full_jw": (_WATER_GEOMETRY, "sto-3g"),
+    "nh3_sto3g_full_jw": (_AMMONIA_GEOMETRY, "sto-3g"),
+    "ch4_sto3g_full_jw": (_METHANE_GEOMETRY, "sto-3g"),
+    "n2_sto3g_full_jw": (
+        (("N", (0.0, 0.0, 0.0)), ("N", (0.0, 0.0, 1.0977))), "sto-3g"
     ),
-    geometry=_bent_symmetric_geometry("O", "H", 0.9576, 104.5),
-)
-
-NH3_STO3G_FULL_JW = MolecularHamiltonianPreset(
-    name="nh3_sto3g_full_jw",
-    description=(
-        "NH3, N-H distance 1.012 angstrom, angle 106.7 degrees, full "
-        "STO-3G orbital space, Jordan-Wigner, 16 qubits"
-    ),
-    geometry=_trigonal_pyramidal_geometry(1.012, 106.7),
-)
-
-CH4_STO3G_FULL_JW = MolecularHamiltonianPreset(
-    name="ch4_sto3g_full_jw",
-    description=(
-        "CH4, tetrahedral C-H distance 1.087 angstrom, full STO-3G "
-        "orbital space, Jordan-Wigner, 18 qubits"
-    ),
-    geometry=_tetrahedral_geometry(1.087),
-)
-
-N2_STO3G_FULL_JW = MolecularHamiltonianPreset(
-    name="n2_sto3g_full_jw",
-    description=(
-        "N2, bond length 1.0977 angstrom, full STO-3G orbital space, "
-        "Jordan-Wigner, 20 qubits"
-    ),
-    geometry=(
-        ("N", (0.0, 0.0, 0.0)),
-        ("N", (0.0, 0.0, 1.0977)),
-    ),
-)
-
-H2O_CCPVDZ_FULL_JW = MolecularHamiltonianPreset(
-    name="h2o_ccpvdz_full_jw",
-    description=(
-        "H2O, O-H distance 0.9576 angstrom, angle 104.5 degrees, full "
-        "cc-pVDZ orbital space, Jordan-Wigner, 48 qubits"
-    ),
-    geometry=_bent_symmetric_geometry("O", "H", 0.9576, 104.5),
-    basis="cc-pvdz",
-)
-
-CH4_CCPVDZ_FULL_JW = MolecularHamiltonianPreset(
-    name="ch4_ccpvdz_full_jw",
-    description=(
-        "CH4, tetrahedral C-H distance 1.087 angstrom, full cc-pVDZ "
-        "orbital space, Jordan-Wigner, 68 qubits"
-    ),
-    geometry=_tetrahedral_geometry(1.087),
-    basis="cc-pvdz",
-)
-
-CO_STO3G_FULL_JW = MolecularHamiltonianPreset(
-    name="co_sto3g_full_jw",
-    description=(
-        "CO, bond length 1.128 angstrom, full STO-3G orbital space, "
-        "Jordan-Wigner, 20 qubits"
-    ),
-    geometry=(
-        ("C", (0.0, 0.0, 0.0)),
-        ("O", (0.0, 0.0, 1.128)),
-    ),
-)
-
-H2S_STO3G_FULL_JW = MolecularHamiltonianPreset(
-    name="h2s_sto3g_full_jw",
-    description=(
-        "H2S, S-H distance 1.336 angstrom, angle 92.1 degrees, full "
-        "STO-3G orbital space, Jordan-Wigner, 22 qubits"
-    ),
-    geometry=_bent_symmetric_geometry("S", "H", 1.336, 92.1),
-)
-
-C2H2_STO3G_FULL_JW = MolecularHamiltonianPreset(
-    name="c2h2_sto3g_full_jw",
-    description=(
-        "C2H2, C-C distance 1.203 angstrom, C-H distance 1.060 angstrom, "
-        "full STO-3G orbital space, Jordan-Wigner, 24 qubits"
-    ),
-    geometry=(
-        ("H", (0.0, 0.0, -1.6615)),
-        ("C", (0.0, 0.0, -0.6015)),
-        ("C", (0.0, 0.0, 0.6015)),
-        ("H", (0.0, 0.0, 1.6615)),
-    ),
-)
-
-CO2_STO3G_FULL_JW = MolecularHamiltonianPreset(
-    name="co2_sto3g_full_jw",
-    description=(
-        "CO2, linear C-O distance 1.160 angstrom, full STO-3G orbital "
-        "space, Jordan-Wigner, 30 qubits"
-    ),
-    geometry=_linear_symmetric_geometry("C", "O", 1.160),
-)
-
-C6H6_STO3G_FULL_JW = MolecularHamiltonianPreset(
-    name="c6h6_sto3g_full_jw",
-    description=(
-        "C6H6, planar D6h geometry with C-C distance 1.397 angstrom and "
-        "C-H distance 1.090 angstrom, full STO-3G orbital space, "
-        "Jordan-Wigner, 72 qubits"
-    ),
-    geometry=_benzene_geometry(1.397, 1.090),
-)
-
-
-MOLECULAR_HAMILTONIANS: dict[str, MolecularHamiltonianPreset] = {
-    H2_STO3G_JW.name: H2_STO3G_JW,
-    LIH_STO3G_ACTIVE_JW.name: LIH_STO3G_ACTIVE_JW,
-    H2O_STO3G_CAS_4E_4O_JW.name: H2O_STO3G_CAS_4E_4O_JW,
-    LIH_STO3G_FULL_JW.name: LIH_STO3G_FULL_JW,
-    BEH2_STO3G_FULL_JW.name: BEH2_STO3G_FULL_JW,
-    H2O_STO3G_FULL_JW.name: H2O_STO3G_FULL_JW,
-    NH3_STO3G_FULL_JW.name: NH3_STO3G_FULL_JW,
-    CH4_STO3G_FULL_JW.name: CH4_STO3G_FULL_JW,
-    N2_STO3G_FULL_JW.name: N2_STO3G_FULL_JW,
-    H2O_CCPVDZ_FULL_JW.name: H2O_CCPVDZ_FULL_JW,
-    CH4_CCPVDZ_FULL_JW.name: CH4_CCPVDZ_FULL_JW,
-    CO_STO3G_FULL_JW.name: CO_STO3G_FULL_JW,
-    H2S_STO3G_FULL_JW.name: H2S_STO3G_FULL_JW,
-    C2H2_STO3G_FULL_JW.name: C2H2_STO3G_FULL_JW,
-    CO2_STO3G_FULL_JW.name: CO2_STO3G_FULL_JW,
-    C6H6_STO3G_FULL_JW.name: C6H6_STO3G_FULL_JW,
+    "h2o_ccpvdz_full_jw": (_WATER_GEOMETRY, "cc-pvdz"),
+    "ch4_ccpvdz_full_jw": (_METHANE_GEOMETRY, "cc-pvdz"),
 }
 
 
-def _pauli_terms_from_qubit_operator(
-    qubit_hamiltonian: object,
-    *,
-    num_qubits: int,
-    coefficient_tolerance: float,
-    project_hermitian: bool = False,
-) -> tuple[tuple[float, str], ...]:
-    """Convert OpenFermion's indexed terms to q_(n-1)...q_0 strings.
+def generate(name, *, coefficient_tolerance=1e-12):
+    """Return the selected molecular Hamiltonian as an identity-free LCP."""
+    from pyscf import ao2mo, gto, scf
 
-    ``project_hermitian=True`` takes the Hermitian part by retaining the real
-    coefficient of each Hermitian Pauli basis element.  This is used only for
-    molecular Hamiltonians constructed from real PySCF integrals.  Generic
-    callers retain the explicit imaginary-coefficient validation.
-    """
-    converted: list[tuple[float, str]] = []
-    for indexed_paulis, raw_coefficient in qubit_hamiltonian.terms.items():
-        coefficient = complex(raw_coefficient)
-        imaginary_tolerance = max(
-            coefficient_tolerance,
-            _HERMITICITY_ROUNDOFF_TOLERANCE,
-            1e-12 * abs(coefficient.real),
-        )
-        if (
-            not project_hermitian
-            and abs(coefficient.imag) > imaginary_tolerance
-        ):
-            raise ValueError("Jordan-Wigner Hamiltonian has a complex coefficient")
-        real_coefficient = float(coefficient.real)
-        if abs(real_coefficient) <= coefficient_tolerance:
-            continue
+    if name == FEMOCO_NAME:
+        from pyscf.tools import fcidump
 
-        symbols = ["I"] * num_qubits
-        for qubit, symbol in indexed_paulis:
-            symbols[num_qubits - 1 - qubit] = symbol
-        converted.append((real_coefficient, "".join(symbols)))
-    return tuple(sorted(converted, key=lambda term: term[1]))
-
-
-@lru_cache(maxsize=16)
-def _generate_molecular_hamiltonian(
-    geometry: Geometry,
-    basis: str,
-    multiplicity: int,
-    charge: int,
-    occupied_indices: tuple[int, ...] | None,
-    active_indices: tuple[int, ...] | None,
-    coefficient_tolerance: float,
-) -> GeneratedMolecularHamiltonian:
-    """Run the electronic-structure calculation once per molecular preset."""
-    from openfermion import MolecularData, get_fermion_operator, jordan_wigner
-    from openfermionpyscf import run_pyscf
-
-    with TemporaryDirectory(prefix="qdrift_pyscf_") as directory:
-        molecule = MolecularData(
-            list(geometry),
-            basis,
-            multiplicity,
-            charge,
-            filename=str(Path(directory) / "molecule"),
-        )
-        molecule = run_pyscf(molecule, run_scf=True)
-        interaction_operator = molecule.get_molecular_hamiltonian(
-            occupied_indices=(
-                None if occupied_indices is None else list(occupied_indices)
-            ),
-            active_indices=(
-                None if active_indices is None else list(active_indices)
-            ),
-        )
-        qubit_hamiltonian = jordan_wigner(
-            get_fermion_operator(interaction_operator)
+        data = fcidump.read(str(FCIDUMP_PATH), verbose=False)
+        if data["NORB"] != 54 or data["NELEC"] != 54:
+            raise ValueError("Reiher FeMoco requires NORB=54 and NELEC=54")
+        two_body = ao2mo.restore(1, data["H2"], data["NORB"])
+        return jordan_wigner.from_spatial_integrals(
+            data["H1"], two_body, coefficient_tolerance=coefficient_tolerance,
         )
 
-    num_qubits = int(interaction_operator.n_qubits)
-    return GeneratedMolecularHamiltonian(
-        num_qubits=num_qubits,
-        terms=_pauli_terms_from_qubit_operator(
-            qubit_hamiltonian,
-            num_qubits=num_qubits,
-            coefficient_tolerance=coefficient_tolerance,
-            project_hermitian=True,
-        ),
-        hartree_fock_energy=float(molecule.hf_energy),
+    geometry, basis = MOLECULAR_HAMILTONIANS[name]
+    molecule = gto.M(atom=geometry, basis=basis, unit="Angstrom", charge=0, spin=0, verbose=0)
+    mean_field = scf.RHF(molecule).run()
+    orbitals = mean_field.mo_coeff
+    one_body = orbitals.T @ mean_field.get_hcore() @ orbitals
+    two_body = ao2mo.restore(1, ao2mo.kernel(molecule, orbitals), orbitals.shape[1])
+    target = jordan_wigner.from_spatial_integrals(
+        one_body, two_body, coefficient_tolerance=coefficient_tolerance,
     )
+    target.terms = dict(sorted(target.terms.items()))
+    return target
